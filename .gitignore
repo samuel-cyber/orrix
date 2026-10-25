@@ -1,0 +1,28 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Private notes — never tracked
+notes/
+
+# Tooling
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
