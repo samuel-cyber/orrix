@@ -19,6 +19,8 @@ SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
 # never races the expiry.
 _EXPIRY_SKEW_SECONDS = 60
 _DEFAULT_TIMEOUT = 30
+_DEFAULT_PAGE_SIZE = 50
+_MAX_PAGES = 20
 
 # PAYPAL-* headers that carry the signature, mapped to the field names the
 # verify-webhook-signature endpoint expects.
@@ -29,6 +31,21 @@ _SIGNATURE_HEADERS = {
     "transmission_sig": "paypal-transmission-sig",
     "transmission_time": "paypal-transmission-time",
 }
+
+
+def _next_link(payload: Mapping[str, Any]) -> str | None:
+    """The href of the `next` link in a paginated response, if any."""
+    links = payload.get("links")
+    if not isinstance(links, list):
+        return None
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        if str(link.get("rel", "")).lower() == "next":
+            href = link.get("href")
+            if isinstance(href, str) and href.startswith(SANDBOX_BASE_URL):
+                return href
+    return None
 
 
 class PayPalError(RuntimeError):
@@ -149,6 +166,48 @@ class SandboxPayPalClient:
                 debug_id=response.headers.get("Paypal-Debug-Id"),
             )
         return response.json()
+
+    def list_disputes(
+        self, page_size: int = _DEFAULT_PAGE_SIZE, max_pages: int = _MAX_PAGES
+    ) -> list[dict[str, Any]]:
+        """List disputes, following `next` links up to a page cap.
+
+        The cap keeps a runaway or looping pagination chain from pinning the
+        poller. Hitting it is logged by the caller, not silently ignored.
+        Items here are summaries: only the dispute id and update_time are
+        trustworthy enough to act on, and even those only to decide whether
+        to call get_dispute.
+        """
+        url: str | None = f"{self.base_url}/v1/customer/disputes"
+        params: dict[str, Any] | None = {"page_size": page_size}
+        items: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+
+        for _ in range(max_pages):
+            if url is None or url in seen_urls:
+                break
+            seen_urls.add(url)
+
+            response = self._session.get(
+                url, headers=self._auth_headers(), params=params, timeout=_DEFAULT_TIMEOUT
+            )
+            if response.status_code != 200:
+                raise PayPalError(
+                    "list_disputes failed",
+                    status_code=response.status_code,
+                    debug_id=response.headers.get("Paypal-Debug-Id"),
+                )
+
+            payload = response.json()
+            page_items = payload.get("items")
+            if isinstance(page_items, list):
+                items.extend(item for item in page_items if isinstance(item, dict))
+
+            url = _next_link(payload)
+            # The next link is already fully qualified with its own query.
+            params = None
+
+        return items
 
     # -- webhook verification --------------------------------------------
 

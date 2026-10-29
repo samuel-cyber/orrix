@@ -79,8 +79,12 @@ def _diagnostic_fields(event: Mapping[str, Any], client: Any) -> dict[str, Any]:
     }
 
 
-def _refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> None:
-    """Background work: re-fetch the dispute and store the fetched state."""
+def refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> bool:
+    """Re-fetch a dispute and store the fetched state. Returns True on success.
+
+    The single ingest path. Both the webhook background task and the poller
+    call this, so a snapshot can only ever come from get_dispute.
+    """
     try:
         snapshot = get_client().get_dispute(dispute_id)
     except PayPalError as error:
@@ -93,7 +97,7 @@ def _refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> Non
             error.status_code,
             error.debug_id,
         )
-        return
+        return False
 
     store.save_case_snapshot(dispute_id, snapshot)
     store.set_event_status(event_id, "processed")
@@ -103,6 +107,7 @@ def _refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> Non
         event_type,
         dispute_id,
     )
+    return True
 
 
 @router.get("/health")
@@ -203,7 +208,7 @@ async def receive_paypal_event(request: Request, background: BackgroundTasks) ->
         return _json_response(200, {"status": "accepted"})
 
     # Respond fast; the fetch happens after the response is sent.
-    background.add_task(_refresh_case, event_id, event_type, dispute_id)
+    background.add_task(refresh_case, event_id, event_type, dispute_id)
     return _json_response(200, {"status": "accepted"})
 
 
