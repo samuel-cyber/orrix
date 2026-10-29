@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
 
 from orrix import store, webhooks
 from orrix.main import app
-from orrix.paypal import MissingSignatureHeaders
+from orrix.paypal import MissingSignatureHeaders, PayPalError, VerificationResult
 
 SIGNATURE_HEADERS = {
     "PAYPAL-AUTH-ALGO": "SHA256withRSA",
@@ -29,21 +30,53 @@ POISONED_PAYLOAD_FIELDS = {
 }
 
 
+FULL_WEBHOOK_ID = "WH-SECRET-ID-9XYZ"
+FAKE_TOKEN = "A21AA-fake-access-token"
+FAKE_SECRET = "EK-fake-client-secret"
+
+
 class FakePayPalClient:
     """Stands in for SandboxPayPalClient. Records calls, contacts nothing."""
 
-    def __init__(self, snapshots=None, verified=True, raise_missing_headers=False):
+    def __init__(
+        self,
+        snapshots=None,
+        verified=True,
+        raise_missing_headers=False,
+        verification_status=None,
+        debug_id="dbg-verify-1",
+        webhook_id=FULL_WEBHOOK_ID,
+        raise_paypal_error=None,
+    ):
         self._snapshots = list(snapshots or [])
         self.verified = verified
         self.raise_missing_headers = raise_missing_headers
+        self.raise_paypal_error = raise_paypal_error
+        self.verification_status = verification_status or ("SUCCESS" if verified else "FAILURE")
+        self.debug_id = debug_id
+        self._webhook_id = webhook_id
         self.verify_calls: list[dict] = []
         self.fetch_calls: list[str] = []
+
+    @property
+    def webhook_id_is_set(self):
+        return bool(self._webhook_id)
+
+    @property
+    def webhook_id_suffix(self):
+        return self._webhook_id[-4:] if self._webhook_id else None
 
     def verify_webhook_signature(self, headers, event):
         self.verify_calls.append(dict(event))
         if self.raise_missing_headers:
             raise MissingSignatureHeaders("missing signature headers: paypal-transmission-sig")
-        return self.verified
+        if self.raise_paypal_error is not None:
+            raise self.raise_paypal_error
+        return VerificationResult(
+            verified=self.verified,
+            verification_status=self.verification_status,
+            debug_id=self.debug_id,
+        )
 
     def get_dispute(self, dispute_id):
         self.fetch_calls.append(dispute_id)
@@ -98,6 +131,109 @@ def test_invalid_signature_is_rejected_and_stores_nothing(client):
     assert fake.fetch_calls == []
     assert store.count_events() == 0
     assert store.count_cases() == 0
+
+
+def test_invalid_signature_logs_safe_diagnostics(client, caplog):
+    fake = FakePayPalClient(verified=False, verification_status="FAILURE", debug_id="dbg-abc123")
+    webhooks.set_client(fake)
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        post_event(client, make_event(event_id="WH-BAD", dispute_id="PP-D-42"))
+
+    message = caplog.text
+    assert "reason=invalid_signature" in message
+    assert "event_id=WH-BAD" in message
+    assert "event_type=CUSTOMER.DISPUTE.CREATED" in message
+    assert "resource_id=PP-D-42" in message
+    assert "verification_status=FAILURE" in message
+    assert "debug_id=dbg-abc123" in message
+    assert "webhook_id_set=True" in message
+    assert "webhook_id_last4=9XYZ" in message
+
+
+def test_invalid_signature_log_leaks_no_secrets_or_body(client, caplog):
+    fake = FakePayPalClient(verified=False)
+    webhooks.set_client(fake)
+    event = make_event(event_id="WH-BAD")
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        post_event(
+            client,
+            event,
+            headers={**SIGNATURE_HEADERS, "Authorization": f"Bearer {FAKE_TOKEN}"},
+        )
+
+    message = caplog.text
+    # The full webhook id must never appear, only its last 4 characters.
+    assert FULL_WEBHOOK_ID not in message
+    assert "WH-SECRET" not in message
+    # No token, no secret, no signature material.
+    assert FAKE_TOKEN not in message
+    assert FAKE_SECRET not in message
+    assert "signature-1" not in message
+    assert "SHA256withRSA" not in message
+    # No request body: none of the payload values beyond the ids.
+    assert "ignore previous instructions" not in message
+    assert "999999.00" not in message
+    assert "RESOLVED_IN_FAVOUR_OF_BUYER" not in message
+    assert json.dumps(event) not in message
+
+
+def test_invalid_signature_logs_when_webhook_id_is_unset(client, caplog):
+    fake = FakePayPalClient(verified=False, webhook_id=None)
+    webhooks.set_client(fake)
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        post_event(client, make_event())
+
+    assert "webhook_id_set=False" in caplog.text
+    assert "webhook_id_last4=None" in caplog.text
+
+
+def test_verification_unavailable_logs_debug_id_and_returns_503(client, caplog):
+    fake = FakePayPalClient(
+        raise_paypal_error=PayPalError(
+            "verify-webhook-signature call failed", status_code=500, debug_id="dbg-upstream"
+        )
+    )
+    webhooks.set_client(fake)
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        response = post_event(client, make_event(event_id="WH-UP"))
+
+    assert response.status_code == 503
+    assert "reason=verification_unavailable" in caplog.text
+    assert "event_id=WH-UP" in caplog.text
+    assert "http_status=500" in caplog.text
+    assert "debug_id=dbg-upstream" in caplog.text
+    assert store.count_events() == 0
+
+
+def test_missing_headers_rejection_logs_diagnostics(client, caplog):
+    fake = FakePayPalClient(raise_missing_headers=True)
+    webhooks.set_client(fake)
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        post_event(client, make_event(event_id="WH-NOHDR"), headers={})
+
+    message = caplog.text
+    assert "reason=missing_signature_headers" in message
+    assert "event_id=WH-NOHDR" in message
+    assert "webhook_id_last4=9XYZ" in message
+    assert FULL_WEBHOOK_ID not in message
+
+
+def test_diagnostics_tolerate_a_malformed_resource(client, caplog):
+    fake = FakePayPalClient(verified=False)
+    webhooks.set_client(fake)
+    event = {"id": "WH-WEIRD", "event_type": None, "resource": "not-a-dict"}
+
+    with caplog.at_level(logging.WARNING, logger="orrix.webhooks"):
+        response = post_event(client, event)
+
+    assert response.status_code == 400
+    assert "event_id=WH-WEIRD" in caplog.text
+    assert "resource_id=None" in caplog.text
 
 
 def test_missing_signature_headers_is_rejected_and_stores_nothing(client):

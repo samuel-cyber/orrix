@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 import requests
@@ -41,6 +42,22 @@ class PayPalError(RuntimeError):
 
 class MissingSignatureHeaders(ValueError):
     """The request did not carry the full set of PAYPAL-* signature headers."""
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    """Outcome of a verify-webhook-signature call.
+
+    Truthy only when PayPal said SUCCESS, so `if verify(...)` stays correct.
+    Holds nothing derived from the request body or any credential.
+    """
+
+    verified: bool
+    verification_status: str | None = None
+    debug_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.verified
 
 
 class SandboxPayPalClient:
@@ -150,11 +167,30 @@ class SandboxPayPalClient:
             raise MissingSignatureHeaders(f"missing signature headers: {', '.join(sorted(missing))}")
         return fields
 
-    def verify_webhook_signature(self, headers: Mapping[str, str], event: Mapping[str, Any]) -> bool:
-        """True only when PayPal answers verification_status == SUCCESS.
+    @property
+    def webhook_id_is_set(self) -> bool:
+        return bool(self._webhook_id)
+
+    @property
+    def webhook_id_suffix(self) -> str | None:
+        """Last 4 characters of the configured webhook id, for diagnostics.
+
+        Enough to tell two registrations apart when verification fails; never
+        enough to reconstruct the id. The full value is never returned or logged.
+        """
+        if not self._webhook_id:
+            return None
+        return self._webhook_id[-4:]
+
+    def verify_webhook_signature(
+        self, headers: Mapping[str, str], event: Mapping[str, Any]
+    ) -> VerificationResult:
+        """Verify an event. Truthy only when PayPal answers SUCCESS.
 
         Raises MissingSignatureHeaders when the PAYPAL-* headers are incomplete.
-        Any other outcome is False: unverified is never treated as verified.
+        Any other outcome is falsy: unverified is never treated as verified.
+        The result carries PayPal's verification_status and debug id so the
+        rejection path can say why without touching the body or any secret.
         """
         if not self._webhook_id:
             raise PayPalError("PAYPAL_WEBHOOK_ID must be set in .env")
@@ -175,4 +211,10 @@ class SandboxPayPalClient:
                 status_code=response.status_code,
                 debug_id=response.headers.get("Paypal-Debug-Id"),
             )
-        return response.json().get("verification_status") == "SUCCESS"
+
+        status = response.json().get("verification_status")
+        return VerificationResult(
+            verified=status == "SUCCESS",
+            verification_status=status,
+            debug_id=response.headers.get("Paypal-Debug-Id"),
+        )

@@ -52,6 +52,33 @@ def extract_dispute_id(event: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _safe_str(value: Any) -> str | None:
+    """Only pass through a plain string; never a nested structure."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _diagnostic_fields(event: Mapping[str, Any], client: Any) -> dict[str, Any]:
+    """Identifiers safe to log on a rejection.
+
+    Deliberately excludes the request body, the signature headers, the token
+    and the full webhook id. The event id and type are untrusted strings used
+    purely as correlation labels, and resource id is whatever identifier the
+    caller claimed, logged as-is only to help match against PayPal's dashboard.
+    """
+    resource = event.get("resource")
+    resource_id = None
+    if isinstance(resource, dict):
+        resource_id = _safe_str(resource.get("id")) or _safe_str(resource.get("dispute_id"))
+
+    return {
+        "event_id": _safe_str(event.get("id")),
+        "event_type": _safe_str(event.get("event_type")),
+        "resource_id": resource_id,
+        "webhook_id_set": getattr(client, "webhook_id_is_set", None),
+        "webhook_id_last4": getattr(client, "webhook_id_suffix", None),
+    }
+
+
 def _refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> None:
     """Background work: re-fetch the dispute and store the fetched state."""
     try:
@@ -97,22 +124,49 @@ async def receive_paypal_event(request: Request, background: BackgroundTasks) ->
         return _json_response(400, {"status": "rejected", "reason": "malformed_json"})
 
     # Verification happens before anything is stored or fetched.
+    client = get_client()
+    diagnostics = _diagnostic_fields(event, client)
     try:
-        verified = get_client().verify_webhook_signature(request.headers, event)
-    except MissingSignatureHeaders:
-        logger.warning("status=rejected reason=missing_signature_headers")
+        result = client.verify_webhook_signature(request.headers, event)
+    except MissingSignatureHeaders as error:
+        logger.warning(
+            "status=rejected reason=missing_signature_headers event_id=%s event_type=%s "
+            "resource_id=%s detail=%s webhook_id_set=%s webhook_id_last4=%s",
+            diagnostics["event_id"],
+            diagnostics["event_type"],
+            diagnostics["resource_id"],
+            error,
+            diagnostics["webhook_id_set"],
+            diagnostics["webhook_id_last4"],
+        )
         return _json_response(400, {"status": "rejected", "reason": "missing_signature_headers"})
     except PayPalError as error:
         # Upstream problem, not a bad caller. Nothing stored; PayPal retries.
         logger.warning(
-            "status=rejected reason=verification_unavailable http_status=%s debug_id=%s",
+            "status=rejected reason=verification_unavailable event_id=%s event_type=%s "
+            "resource_id=%s http_status=%s debug_id=%s webhook_id_set=%s webhook_id_last4=%s",
+            diagnostics["event_id"],
+            diagnostics["event_type"],
+            diagnostics["resource_id"],
             error.status_code,
             error.debug_id,
+            diagnostics["webhook_id_set"],
+            diagnostics["webhook_id_last4"],
         )
         return _json_response(503, {"status": "rejected", "reason": "verification_unavailable"})
 
-    if not verified:
-        logger.warning("status=rejected reason=invalid_signature")
+    if not result:
+        logger.warning(
+            "status=rejected reason=invalid_signature event_id=%s event_type=%s resource_id=%s "
+            "verification_status=%s debug_id=%s webhook_id_set=%s webhook_id_last4=%s",
+            diagnostics["event_id"],
+            diagnostics["event_type"],
+            diagnostics["resource_id"],
+            getattr(result, "verification_status", None),
+            getattr(result, "debug_id", None),
+            diagnostics["webhook_id_set"],
+            diagnostics["webhook_id_last4"],
+        )
         return _json_response(400, {"status": "rejected", "reason": "invalid_signature"})
 
     event_id = event.get("id")
