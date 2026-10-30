@@ -19,7 +19,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
+from pydantic import ValidationError
+
 from .audit import AuditLog, OriginTag, hash_payload
+from .claim_form import ClaimForm
 from .discrepancy import Discrepancy, detect_discrepancy
 from .facts import Facts, FactsIntegrityError, build_facts
 from .policy import CaseState, PolicyConfig, PolicyDecision, decide
@@ -41,6 +44,11 @@ STATUS_ACTION_AVAILABLE = "action_available"
 STATUS_NEEDS_HUMAN_REVIEW = "needs_human_review"
 STATUS_NO_ACTION = "no_action"
 STATUS_FACTS_FAILED = "facts_failed"
+
+# Failures worth retrying on the next pass rather than caching.
+_TRANSIENT_READER_REASONS = frozenset(
+    {"rate_limited", "http_error", "transport_error", "reader_not_configured"}
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS case_views (
@@ -197,11 +205,59 @@ def _status_for(decision: PolicyDecision) -> str:
     return STATUS_NO_ACTION
 
 
+def _cached_reader_result(
+    deps: PipelineDeps, dispute_id: str, update_time: Any
+) -> tuple[ReaderResult, str | None, str | None] | None:
+    """A stored reader result for this exact dispute version, if any.
+
+    Reused so that rendering a page, or listing the queue, does not spend a
+    model call per view. A changed update_time means a changed record and
+    earns a fresh read.
+    """
+    if not dispute_id or not isinstance(update_time, str):
+        return None
+
+    row = deps.case_views.get(dispute_id)
+    if not row or row.get("update_time") != update_time:
+        return None
+
+    try:
+        stored = json.loads(row["reader_json"] or "{}")
+    except (ValueError, TypeError):
+        return None
+    if not stored:
+        return None
+
+    # A transient failure should be retried rather than cached.
+    if stored.get("reason") in _TRANSIENT_READER_REASONS:
+        return None
+
+    form = None
+    if stored.get("form"):
+        try:
+            form = ClaimForm.model_validate(stored["form"])
+        except ValidationError:
+            return None
+
+    return (
+        ReaderResult(
+            form=form,
+            status=stored.get("status", STATUS_NEEDS_REVIEW),
+            reason=stored.get("reason"),
+            attempts=stored.get("attempts", 0) or 0,
+            http_status=stored.get("http_status"),
+        ),
+        row.get("reader_started_at"),
+        row.get("reader_finished_at"),
+    )
+
+
 def process_case(
     snapshot: Mapping[str, Any],
     deps: PipelineDeps,
     seller_input: SellerEvidenceInput | None = None,
     case_state: CaseState | None = None,
+    reuse_reader: bool = True,
 ) -> CaseView:
     """Run the pipeline over one freshly fetched dispute record.
 
@@ -263,7 +319,14 @@ def process_case(
     reader_started_at: str | None = None
     reader_finished_at: str | None = None
 
-    if deps.reader_config is None:
+    # A model call costs money and the record has not changed, so reuse the
+    # stored result rather than re-reading on every page load. Only a new
+    # update_time earns a fresh read.
+    cached = _cached_reader_result(deps, dispute_id, update_time) if reuse_reader else None
+
+    if cached is not None:
+        reader_result, reader_started_at, reader_finished_at = cached
+    elif deps.reader_config is None:
         reader_result = ReaderResult(
             form=None, status=STATUS_NEEDS_REVIEW, reason=REASON_NOT_CONFIGURED
         )

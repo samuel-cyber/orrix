@@ -280,3 +280,113 @@ def test_a_snapshot_with_a_discrepancy_records_it(deps):
     assert any(
         entry.action == "pipeline.discrepancy_detected" for entry in deps.audit.entries()
     )
+
+
+# -- the reader is not re-run for an unchanged record -------------------
+
+
+def _counting_reader_deps(tmp_path, policy_config, counter):
+    good = json.dumps(
+        {
+            "claim_type": "NOT_RECEIVED",
+            "claimed_amount": "20.00",
+            "language": "en",
+            "seller_summary": "Buyer says it never arrived.",
+        }
+    )
+
+    class Response:
+        status_code = 200
+        headers: dict = {}
+
+        def json(self):
+            return {"choices": [{"message": {"content": good}}]}
+
+    class FakeClient:
+        def post(self, url, **kwargs):
+            counter.append(1)
+            return Response()
+
+    return PipelineDeps(
+        audit=AuditLog(AuditConfig(db_path=str(tmp_path / "audit.db"))),
+        case_views=CaseViewStore(str(tmp_path / "views.db")),
+        policy_config=policy_config,
+        reader_config=ReaderConfig(
+            base_url="https://model.example.invalid/v1", api_key="sk-test", model="m"
+        ),
+        reader_client=FakeClient(),
+    )
+
+
+def test_an_unchanged_record_does_not_spend_a_second_model_call(tmp_path, policy_config):
+    """Rendering a page must not cost a model call every time."""
+    calls: list = []
+    deps = _counting_reader_deps(tmp_path, policy_config, calls)
+
+    first = process_case(load_fixture(), deps)
+    second = process_case(load_fixture(), deps)
+    third = process_case(load_fixture(), deps)
+
+    assert len(calls) == 1, "the reader should run once for one dispute version"
+    assert second.reader_result.form is not None
+    assert second.reader_result.form.claim_type == first.reader_result.form.claim_type
+    assert third.reader_started_at == first.reader_started_at
+
+
+def test_a_changed_update_time_earns_a_fresh_read(tmp_path, policy_config):
+    calls: list = []
+    deps = _counting_reader_deps(tmp_path, policy_config, calls)
+
+    process_case(load_fixture(), deps)
+
+    moved = copy.deepcopy(load_fixture())
+    moved["update_time"] = "2026-11-03T08:00:00.000Z"
+    process_case(moved, deps)
+
+    assert len(calls) == 2
+
+
+def test_reuse_can_be_turned_off(tmp_path, policy_config):
+    calls: list = []
+    deps = _counting_reader_deps(tmp_path, policy_config, calls)
+
+    process_case(load_fixture(), deps)
+    process_case(load_fixture(), deps, reuse_reader=False)
+
+    assert len(calls) == 2
+
+
+def test_a_transient_failure_is_retried_rather_than_cached(tmp_path, policy_config):
+    calls: list = []
+
+    class Response:
+        status_code = 429
+        headers: dict = {}
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def post(self, url, **kwargs):
+            calls.append(1)
+            return Response()
+
+    deps = PipelineDeps(
+        audit=AuditLog(AuditConfig(db_path=str(tmp_path / "audit.db"))),
+        case_views=CaseViewStore(str(tmp_path / "views.db")),
+        policy_config=policy_config,
+        reader_config=ReaderConfig(
+            base_url="https://model.example.invalid/v1",
+            api_key="sk-test",
+            model="m",
+            max_retries=0,
+            retry_backoff_seconds=0.0,
+        ),
+        reader_client=FakeClient(),
+    )
+
+    process_case(load_fixture(), deps)
+    before = len(calls)
+    process_case(load_fixture(), deps)
+
+    assert len(calls) > before, "a rate-limited read must be retried, not cached"
