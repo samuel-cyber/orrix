@@ -484,10 +484,10 @@ def test_a_malicious_reader_summary_never_reaches_the_writer(
         assert summary not in sent
 
 
-def test_the_payload_cannot_be_built_without_confirmed_tracking():
-    facts = build_facts(load_fixture())  # no seller tracking yet
+def test_the_payload_cannot_be_built_without_usable_tracking():
+    facts = build_facts(load_fixture())  # no tracking from either source
 
-    with pytest.raises(ValueError, match="not confirmed"):
+    with pytest.raises(ValueError, match="not usable"):
         build_evidence_payload(facts)
 
 

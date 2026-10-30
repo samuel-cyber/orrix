@@ -256,20 +256,26 @@ def policy_config():
     return PolicyConfig(clock=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc))
 
 
-def make_deps(reader, writer, audit_log, executed, policy_config):
+def make_deps(reader, writer, audit_log, executed, policy_config, seller_input=None):
     return ExecutorDeps(
         paypal_reader=reader,
         writer=writer,
         audit=audit_log,
         executed=executed,
         policy_config=policy_config,
+        seller_input=seller_input,
     )
 
 
-def approve_from(snapshot, policy_config=None, action=PROVIDE_EVIDENCE):
+def approve_from(
+    snapshot, policy_config=None, action=PROVIDE_EVIDENCE, payload=None, seller_input=None
+):
     """Build the approval a seller would create for this snapshot."""
-    facts = build_facts(snapshot, expected_dispute_id=snapshot["dispute_id"])
-    payload = build_evidence_payload(facts)
+    if payload is None:
+        facts = build_facts(
+            snapshot, seller_input=seller_input, expected_dispute_id=snapshot["dispute_id"]
+        )
+        payload = build_evidence_payload(facts)
     return create_approval(
         dispute_id=snapshot["dispute_id"],
         action=action,

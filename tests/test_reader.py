@@ -103,8 +103,40 @@ def test_extract_buyer_text_takes_buyer_message_and_buyer_evidence_notes(snapsho
     text = extract_buyer_text(snapshot)
 
     assert INJECTION in text
-    # The fixture carries it twice: a message and buyer-submitted evidence.
-    assert text.count(INJECTION) == 2
+    # The fixture carries it twice — a message and buyer-submitted evidence —
+    # but identical strings are deduped, so it appears once.
+    assert text.count(INJECTION) == 1
+
+
+def test_extract_buyer_text_dedupes_identical_strings(snapshot):
+    """A buyer's message and their evidence note are usually the same text."""
+    assert snapshot["messages"][0]["content"] == snapshot["evidences"][0]["notes"]
+
+    text = extract_buyer_text(snapshot)
+
+    assert text == INJECTION
+    assert len(text) == len(INJECTION)
+
+
+def test_extract_buyer_text_keeps_distinct_strings(snapshot):
+    snapshot["messages"].append({"posted_by": "BUYER", "content": "A second, different note."})
+
+    text = extract_buyer_text(snapshot)
+
+    assert INJECTION in text
+    assert "A second, different note." in text
+    assert text.count("\n") == 1, "two distinct pieces, one separator"
+
+
+def test_extract_buyer_text_dedupes_many_repeats():
+    snapshot = {
+        "messages": [{"posted_by": "BUYER", "content": "same text"} for _ in range(50)],
+        "evidences": [
+            {"source": "SUBMITTED_BY_BUYER", "notes": "same text"} for _ in range(50)
+        ],
+    }
+
+    assert extract_buyer_text(snapshot) == "same text"
 
 
 def test_extract_buyer_text_ignores_seller_and_other_authors(snapshot):

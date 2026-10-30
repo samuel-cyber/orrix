@@ -269,3 +269,137 @@ def test_payload_is_hashed_never_stored(log):
 def test_identical_payloads_hash_identically_and_differ_otherwise(log):
     assert hash_payload({"a": 1, "b": 2}) == hash_payload({"b": 2, "a": 1})
     assert hash_payload({"a": 1}) != hash_payload({"a": 2})
+
+
+# -- HMAC mode ----------------------------------------------------------
+
+HMAC_KEY = "test-audit-key-not-a-real-secret"
+
+
+def forge_a_consistent_append(log, hmac_key=None):
+    """Append a row with correct hashes AND a matching head anchor.
+
+    This is the strongest forgery available to someone with write access to
+    the database. Without a key it succeeds; with one it cannot.
+    """
+    from orrix.audit import AuditEntry
+
+    entries = log.entries()
+    forged = AuditEntry(
+        seq=len(entries) + 1,
+        ts="2026-10-30T00:00:00+00:00",
+        actor="attacker",
+        action="execute.confirmed",
+        dispute_id="PP-R-PXL-10195222",
+        origin_tag="system",
+        payload_hash=hash_payload({"forged": True}),
+        prev_hash=entries[-1].entry_hash,
+        entry_hash="",
+    )
+    entry_hash = forged.recompute_hash(hmac_key)
+
+    with raw(log) as connection:
+        connection.execute(
+            """
+            INSERT INTO audit_log
+                (seq, ts, actor, action, dispute_id, origin_tag, payload_hash,
+                 prev_hash, entry_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                forged.seq,
+                forged.ts,
+                forged.actor,
+                forged.action,
+                forged.dispute_id,
+                forged.origin_tag,
+                forged.payload_hash,
+                forged.prev_hash,
+                entry_hash,
+            ),
+        )
+        # The forger updates the anchor too.
+        connection.execute(
+            "UPDATE audit_head SET seq = ?, entry_hash = ?, entries = ?",
+            (forged.seq, entry_hash, forged.seq),
+        )
+    return forged.seq
+
+
+def test_plain_mode_cannot_detect_a_fully_consistent_forgery(log):
+    """The honest limitation: SHA-256 needs no secret, so this slips through."""
+    seed(log, 3)
+
+    forged_seq = forge_a_consistent_append(log)
+
+    assert log.verify_chain() is None, (
+        "plain mode is expected to miss this; it is why the HMAC key exists"
+    )
+    assert len(log.entries()) == forged_seq
+
+
+def test_hmac_mode_detects_the_same_forgery(tmp_path):
+    keyed = AuditLog(AuditConfig(db_path=str(tmp_path / "keyed.db"), hmac_key=HMAC_KEY))
+    seed(keyed, 3)
+    assert keyed.verify_chain() is None
+
+    # The forger has table access but not the key.
+    forged_seq = forge_a_consistent_append(keyed, hmac_key=None)
+
+    assert keyed.verify_chain() == forged_seq
+
+
+def test_hmac_mode_detects_a_forgery_made_with_the_wrong_key(tmp_path):
+    keyed = AuditLog(AuditConfig(db_path=str(tmp_path / "keyed.db"), hmac_key=HMAC_KEY))
+    seed(keyed, 3)
+
+    forged_seq = forge_a_consistent_append(keyed, hmac_key="the-wrong-key")
+
+    assert keyed.verify_chain() == forged_seq
+
+
+def test_hmac_mode_verifies_its_own_entries(tmp_path):
+    keyed = AuditLog(AuditConfig(db_path=str(tmp_path / "keyed.db"), hmac_key=HMAC_KEY))
+    seed(keyed, 8)
+
+    assert keyed.verify_chain() is None
+
+
+def test_hmac_mode_still_detects_the_ordinary_tampering(tmp_path):
+    keyed = AuditLog(AuditConfig(db_path=str(tmp_path / "keyed.db"), hmac_key=HMAC_KEY))
+    seed(keyed, 5)
+
+    with raw(keyed) as connection:
+        connection.execute("UPDATE audit_log SET action = 'tampered' WHERE seq = 2")
+
+    assert keyed.verify_chain() == 2
+
+
+def test_the_wrong_key_invalidates_an_existing_chain(tmp_path):
+    """Verifying with a different key fails, as it must."""
+    path = str(tmp_path / "keyed.db")
+    AuditLog(AuditConfig(db_path=path, hmac_key=HMAC_KEY)).append(
+        actor="system", action="x", origin_tag=OriginTag.SYSTEM
+    )
+
+    other = AuditLog(AuditConfig(db_path=path, hmac_key="different-key"))
+
+    assert other.verify_chain() == 1
+
+
+def test_keyed_and_plain_digests_differ(tmp_path):
+    from orrix.audit import chain_digest
+
+    assert chain_digest("payload") != chain_digest("payload", HMAC_KEY)
+    assert chain_digest("payload", HMAC_KEY) == chain_digest("payload", HMAC_KEY)
+
+
+def test_the_key_is_never_shown_in_a_repr(tmp_path):
+    config = AuditConfig(db_path=str(tmp_path / "k.db"), hmac_key=HMAC_KEY)
+
+    assert HMAC_KEY not in repr(config)
+    assert HMAC_KEY not in repr(AuditLog(config).config)
+
+
+def test_hmac_key_defaults_to_none(tmp_path):
+    assert AuditConfig(db_path=str(tmp_path / "k.db")).hmac_key is None

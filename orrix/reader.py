@@ -140,7 +140,16 @@ def extract_buyer_text(snapshot: Mapping[str, Any]) -> str:
             if isinstance(text, str) and text.strip():
                 pieces.append(text.strip())
 
-    return "\n".join(pieces).strip()[:BUYER_TEXT_MAX_CHARS]
+    # A buyer's message and their evidence note are usually the same string.
+    # Sending it twice wastes the budget and over-weights it in the prompt.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        if piece not in seen:
+            seen.add(piece)
+            deduped.append(piece)
+
+    return "\n".join(deduped).strip()[:BUYER_TEXT_MAX_CHARS]
 
 
 def _user_message(buyer_text: str, ceiling: Decimal) -> str:

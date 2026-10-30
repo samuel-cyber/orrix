@@ -10,7 +10,10 @@ from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from .seller_input import SellerEvidenceInput
+
 SOURCE_PAYPAL_RECORD = "paypal_record"
+SOURCE_SELLER_INPUT = "seller_input"
 
 # Shapes a trusted value is allowed to take. Anything failing its pattern
 # becomes unavailable rather than being passed through as text.
@@ -21,6 +24,7 @@ _TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)
 # Carrier names and tracking numbers are seller-typed, so they are held to a
 # conservative charset. Prose in a tracking field is not a tracking number.
 _TRACKING_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-/]{0,63}$")
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Every fact Orrix is willing to hold. Nothing outside this list is read, so
 # a new PayPal field is dropped by construction rather than by rule.
@@ -43,13 +47,22 @@ FACT_NAMES: tuple[str, ...] = (
     "tracking_carrier",
     "tracking_number",
     "requested_evidence_types",
+    "delivery_status",
+    "delivered_on",
 )
 
 
 class FactStatus(str, Enum):
     CONFIRMED = "confirmed"
+    #: Asserted by the seller, not corroborated by the PayPal record. Usable
+    #: for building evidence, but never treated as proof of anything.
+    SELLER_ASSERTED = "seller_asserted"
     CONFLICTING = "conflicting"
     UNAVAILABLE = "unavailable"
+
+
+#: Statuses whose value may be read and acted on.
+USABLE_STATUSES = frozenset({FactStatus.CONFIRMED, FactStatus.SELLER_ASSERTED})
 
 
 class FactsIntegrityError(ValueError):
@@ -78,7 +91,13 @@ class Fact(BaseModel):
 
     @property
     def is_confirmed(self) -> bool:
+        """Corroborated by the PayPal record. Seller assertions are not."""
         return self.status is FactStatus.CONFIRMED
+
+    @property
+    def is_usable(self) -> bool:
+        """Confirmed, or asserted by the seller. Either may be acted on."""
+        return self.status in USABLE_STATUSES
 
 
 class Facts(BaseModel):
@@ -100,9 +119,12 @@ class Facts(BaseModel):
         return self.facts[name]
 
     def value(self, name: str) -> Any:
-        """The value, or None when the fact is not confirmed."""
+        """The value, or None when the fact is neither confirmed nor asserted."""
         fact = self.get(name)
-        return fact.value if fact.is_confirmed else None
+        return fact.value if fact.is_usable else None
+
+    def source(self, name: str) -> str:
+        return self.get(name).source
 
     def status(self, name: str) -> FactStatus:
         return self.get(name).status
@@ -126,29 +148,47 @@ class _FactBuilder:
         self.retrieved_at = retrieved_at
         self.facts: dict[str, Fact] = {}
 
-    def _add(self, name: str, value: Any, status: FactStatus, entity_id: str | None) -> None:
+    def _add(
+        self,
+        name: str,
+        value: Any,
+        status: FactStatus,
+        entity_id: str | None,
+        source: str = SOURCE_PAYPAL_RECORD,
+    ) -> None:
         self.facts[name] = Fact(
             name=name,
             value=value,
             status=status,
+            source=source,
             entity_id=entity_id,
             retrieved_at=self.retrieved_at,
         )
 
-    def unavailable(self, name: str, entity_id: str | None = None) -> None:
+    def unavailable(
+        self, name: str, entity_id: str | None = None, source: str = SOURCE_PAYPAL_RECORD
+    ) -> None:
         """Absent or unusable data. Never recorded as a negative fact."""
-        self._add(name, None, FactStatus.UNAVAILABLE, entity_id)
+        self._add(name, None, FactStatus.UNAVAILABLE, entity_id, source)
 
-    def conflicting(self, name: str, entity_id: str | None = None) -> None:
-        self._add(name, None, FactStatus.CONFLICTING, entity_id)
+    def conflicting(
+        self, name: str, entity_id: str | None = None, source: str = SOURCE_PAYPAL_RECORD
+    ) -> None:
+        self._add(name, None, FactStatus.CONFLICTING, entity_id, source)
 
     def pattern(
-        self, name: str, raw: Any, pattern: re.Pattern[str], entity_id: str | None = None
+        self,
+        name: str,
+        raw: Any,
+        pattern: re.Pattern[str],
+        entity_id: str | None = None,
+        source: str = SOURCE_PAYPAL_RECORD,
+        status: FactStatus = FactStatus.CONFIRMED,
     ) -> None:
         if isinstance(raw, str) and pattern.match(raw.strip()):
-            self._add(name, raw.strip(), FactStatus.CONFIRMED, entity_id)
+            self._add(name, raw.strip(), status, entity_id, source)
         else:
-            self.unavailable(name, entity_id)
+            self.unavailable(name, entity_id, source)
 
     def boolean(self, name: str, raw: Any, entity_id: str | None = None) -> None:
         if isinstance(raw, bool):
@@ -223,6 +263,59 @@ def _tracking_info(evidences: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def _resolve_tracking(
+    builder: "_FactBuilder",
+    name: str,
+    paypal_raw: Any,
+    seller_raw: Any,
+    entity_id: str | None,
+) -> None:
+    """Settle one tracking field between the PayPal record and the seller.
+
+    The record wins when both agree, because it is corroborated. When they
+    disagree the fact is conflicting and carries no value, so no action can
+    be taken on either version. A seller value alone is usable but only ever
+    seller_asserted. Prose in either source fails the pattern and becomes
+    unavailable, exactly as before.
+    """
+    paypal_value = (
+        paypal_raw.strip()
+        if isinstance(paypal_raw, str) and _TRACKING_PATTERN.match(paypal_raw.strip())
+        else None
+    )
+    seller_value = (
+        seller_raw.strip()
+        if isinstance(seller_raw, str) and _TRACKING_PATTERN.match(seller_raw.strip())
+        else None
+    )
+
+    if paypal_value is not None and seller_value is not None:
+        if paypal_value.casefold() == seller_value.casefold():
+            builder.pattern(name, paypal_value, _TRACKING_PATTERN, entity_id)
+        else:
+            builder.conflicting(name, entity_id)
+        return
+
+    if paypal_value is not None:
+        builder.pattern(name, paypal_value, _TRACKING_PATTERN, entity_id)
+        return
+
+    if seller_value is not None:
+        builder.pattern(
+            name,
+            seller_value,
+            _TRACKING_PATTERN,
+            entity_id,
+            SOURCE_SELLER_INPUT,
+            FactStatus.SELLER_ASSERTED,
+        )
+        return
+
+    # Neither source offered a usable value. Unavailable, not a denial.
+    source = SOURCE_SELLER_INPUT if seller_raw is not None else SOURCE_PAYPAL_RECORD
+    builder.unavailable(name, entity_id, source)
+
+
 def _requested_evidence_types(evidences: Any) -> list[str]:
     if not isinstance(evidences, list):
         return []
@@ -240,6 +333,7 @@ def _requested_evidence_types(evidences: Any) -> list[str]:
 
 def build_facts(
     dispute_snapshot: Mapping[str, Any],
+    seller_input: SellerEvidenceInput | None = None,
     expected_dispute_id: str | None = None,
     expected_transaction_id: str | None = None,
     retrieved_at: datetime | None = None,
@@ -256,6 +350,12 @@ def build_facts(
     """
     if not isinstance(dispute_snapshot, Mapping):
         raise FactsIntegrityError("dispute snapshot must be a mapping")
+
+    # Fail closed on anything claiming to be seller input but not validated.
+    if seller_input is not None and not isinstance(seller_input, SellerEvidenceInput):
+        raise FactsIntegrityError(
+            "seller_input must be a SellerEvidenceInput; parse it with parse_seller_input first"
+        )
 
     retrieved_at = retrieved_at or datetime.now(timezone.utc)
 
@@ -356,18 +456,48 @@ def build_facts(
             transaction_entity,
         )
 
-    # -- evidence --------------------------------------------------------
-    tracking = _tracking_info(dispute_snapshot.get("evidences"))
-    if tracking is None:
-        builder.unavailable("tracking_carrier", dispute_id)
-        builder.unavailable("tracking_number", dispute_id)
+    # -- tracking, from the record and from the seller -------------------
+    tracking = _tracking_info(dispute_snapshot.get("evidences")) or {}
+    _resolve_tracking(
+        builder,
+        "tracking_carrier",
+        paypal_raw=tracking.get("carrier_name"),
+        seller_raw=getattr(seller_input, "carrier", None),
+        entity_id=dispute_id,
+    )
+    _resolve_tracking(
+        builder,
+        "tracking_number",
+        paypal_raw=tracking.get("tracking_number"),
+        seller_raw=getattr(seller_input, "tracking_number", None),
+        entity_id=dispute_id,
+    )
+
+    # -- seller assertions about delivery --------------------------------
+    if seller_input is None:
+        builder.unavailable("delivery_status", dispute_id, SOURCE_SELLER_INPUT)
+        builder.unavailable("delivered_on", dispute_id, SOURCE_SELLER_INPUT)
     else:
         builder.pattern(
-            "tracking_carrier", tracking.get("carrier_name"), _TRACKING_PATTERN, dispute_id
+            "delivery_status",
+            getattr(seller_input.delivery_status, "value", seller_input.delivery_status),
+            _CODE_PATTERN,
+            dispute_id,
+            SOURCE_SELLER_INPUT,
+            FactStatus.SELLER_ASSERTED,
         )
-        builder.pattern(
-            "tracking_number", tracking.get("tracking_number"), _TRACKING_PATTERN, dispute_id
-        )
+        delivered_on = seller_input.delivered_on
+        if delivered_on is None:
+            builder.unavailable("delivered_on", dispute_id, SOURCE_SELLER_INPUT)
+        else:
+            builder.pattern(
+                "delivered_on",
+                delivered_on.isoformat(),
+                _DATE_PATTERN,
+                dispute_id,
+                SOURCE_SELLER_INPUT,
+                FactStatus.SELLER_ASSERTED,
+            )
 
     builder.codes(
         "requested_evidence_types",

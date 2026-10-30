@@ -28,6 +28,10 @@ FORBIDDEN_FOR_UNTRUSTED = (
 # Modules that handle untrusted buyer text.
 UNTRUSTED_SIDE = ("reader.py", "claim_form.py")
 
+# Leaf modules that take untrusted input or compare facts. They must stay
+# free of PayPal access, write capability, persistence and the reader.
+INPUT_AND_ANALYSIS_SIDE = ("seller_input.py", "discrepancy.py")
+
 # Any of these in reader.py or claim_form.py means credentials are being read
 # somewhere they should not be.
 CREDENTIAL_READERS = ("os.environ", "os.getenv", "dotenv", "load_dotenv")
@@ -189,6 +193,8 @@ def test_reader_requests_no_tools_or_function_calling():
 
 # Modules that must never be able to write to PayPal.
 NO_WRITE_CAPABILITY = (
+    "seller_input.py",
+    "discrepancy.py",
     "reader.py",
     "facts.py",
     "claim_form.py",
@@ -328,3 +334,72 @@ def test_the_only_write_endpoint_is_provide_evidence():
         f"paypal_write.py names a money-moving endpoint: {offenders}. v3 submits "
         f"evidence and nothing else."
     )
+
+
+# -- seller input and the discrepancy detector --------------------------
+
+
+@pytest.mark.parametrize("filename", INPUT_AND_ANALYSIS_SIDE)
+def test_input_and_analysis_modules_import_nothing_privileged(filename):
+    path = ORRIX_DIR / filename
+    forbidden = FORBIDDEN_FOR_UNTRUSTED + ("orrix.reader", "orrix.paypal_write")
+
+    imports = imported_modules(parse(path))
+    offenders = sorted(
+        name
+        for name in imports
+        if any(name == bad or name.startswith(bad + ".") for bad in forbidden)
+    )
+    assert not offenders, (
+        f"{filename} imports {', '.join(offenders)}. It must not reach PayPal, the "
+        f"executor, the store, the poller, the webhooks or the reader."
+    )
+
+
+@pytest.mark.parametrize("filename", INPUT_AND_ANALYSIS_SIDE)
+def test_input_and_analysis_modules_read_no_credentials(filename):
+    path = ORRIX_DIR / filename
+    tree = parse(path)
+
+    offenders = sorted(
+        {name for name in dotted_attribute_calls(tree) if name in CREDENTIAL_READERS}
+        | {name for name in imported_modules(tree) if any(b in name for b in CREDENTIAL_READERS)}
+        | {name for name in string_constants(tree) if name in CREDENTIAL_NAMES}
+    )
+    assert not offenders, (
+        f"{filename} reaches for credentials via {', '.join(offenders)}; it takes its "
+        f"input from its caller."
+    )
+
+
+@pytest.mark.parametrize("filename", INPUT_AND_ANALYSIS_SIDE)
+def test_input_and_analysis_modules_name_no_paypal_endpoint(filename):
+    constants = string_constants(parse(ORRIX_DIR / filename))
+
+    offenders = sorted(
+        value
+        for value in constants
+        if "paypal.com" in value.lower() or "/v1/customer/disputes" in value
+    )
+    assert not offenders, f"{filename} references a PayPal endpoint: {offenders}"
+
+
+def test_the_discrepancy_detector_consults_no_model():
+    imports = imported_modules(parse(ORRIX_DIR / "discrepancy.py"))
+
+    offenders = sorted(
+        name
+        for name in imports
+        if any(bad in name.lower() for bad in ("anthropic", "openai", "requests", "httpx"))
+    )
+    assert not offenders, f"discrepancy.py imports {offenders}; it must be plain code."
+
+
+def test_seller_input_has_no_free_text_field():
+    """Enforced in the source, not only in the model's behaviour."""
+    from orrix.seller_input import SellerEvidenceInput
+
+    free_text_names = {"notes", "note", "comment", "description", "summary", "message", "text"}
+    offenders = free_text_names & set(SellerEvidenceInput.model_fields)
+
+    assert not offenders, f"SellerEvidenceInput gained a free-text field: {offenders}"

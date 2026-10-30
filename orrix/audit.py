@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
@@ -58,6 +59,19 @@ def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def chain_digest(text: str, hmac_key: str | None = None) -> str:
+    """Chain digest: plain SHA-256, or HMAC-SHA256 when a key is configured.
+
+    Without a key the chain is tamper-evident only against someone who
+    cannot recompute it — which is nobody, since SHA-256 needs no secret.
+    With a key, forging an entry requires the key as well as table access.
+    See docs/THREAT_MODEL.md for what this does and does not buy.
+    """
+    if not hmac_key:
+        return sha256_hex(text)
+    return hmac.new(hmac_key.encode("utf-8"), text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def hash_payload(payload: Any) -> str:
     """Hash of a payload. The payload itself is never stored."""
     return sha256_hex(canonical_json(payload))
@@ -65,9 +79,16 @@ def hash_payload(payload: Any) -> str:
 
 @dataclass(frozen=True)
 class AuditConfig:
-    """Passed in by the caller. No environment is read here."""
+    """Passed in by the caller. No environment is read here.
+
+    hmac_key is optional. When set, the chain is keyed, so an attacker with
+    write access to the database still cannot forge a consistent entry
+    without the key. The caller is responsible for sourcing it (an env var,
+    a secret manager) and for keeping it off the same disk as the log.
+    """
 
     db_path: str
+    hmac_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -82,8 +103,8 @@ class AuditEntry:
     prev_hash: str
     entry_hash: str
 
-    def recompute_hash(self) -> str:
-        return sha256_hex(
+    def recompute_hash(self, hmac_key: str | None = None) -> str:
+        return chain_digest(
             canonical_json(
                 [
                     self.seq,
@@ -95,7 +116,8 @@ class AuditEntry:
                     self.payload_hash,
                     self.prev_hash,
                 ]
-            )
+            ),
+            hmac_key,
         )
 
 
@@ -161,7 +183,7 @@ class AuditLog:
                 prev_hash=prev_hash,
                 entry_hash="",
             )
-            entry_hash = entry.recompute_hash()
+            entry_hash = entry.recompute_hash(self.config.hmac_key)
 
             connection.execute(
                 """
@@ -226,7 +248,7 @@ class AuditLog:
                 return entry.seq
             if entry.prev_hash != expected_prev:
                 return entry.seq
-            if entry.entry_hash != entry.recompute_hash():
+            if entry.entry_hash != entry.recompute_hash(self.config.hmac_key):
                 return entry.seq
             if entry.origin_tag not in ORIGIN_TAGS:
                 return entry.seq

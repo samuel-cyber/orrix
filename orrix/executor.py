@@ -12,12 +12,14 @@ from .audit import AuditLog, OriginTag, hash_payload
 from .facts import Facts, FactsIntegrityError, FactStatus, build_facts
 from .paypal_write import PayPalWriteError, SandboxPayPalWriter
 from .policy import PROVIDE_EVIDENCE, CaseState, PolicyConfig, decide
+from .seller_input import SellerEvidenceInput
 
 ACTOR = "executor"
 
-# Fixed template. Every value comes from a confirmed Fact; there is no
-# parameter here a reader, a model or a buyer could reach.
-EVIDENCE_NOTE = "Tracking information submitted from the merchant's PayPal transaction record."
+# Fixed template. The only values interpolated are the carrier and tracking
+# number, both drawn from Facts. There is no parameter here a reader, a model
+# or a buyer could reach.
+EVIDENCE_NOTE_TEMPLATE = "Tracking supplied by seller: {carrier} {number}."
 
 STATUS_EXECUTED = "executed"
 STATUS_REFUSED = "refused"
@@ -102,6 +104,10 @@ class ExecutorDeps:
     audit: AuditLog
     executed: ExecutedApprovals
     policy_config: PolicyConfig = field(default_factory=PolicyConfig)
+    #: The validated seller submission this approval was built from, when the
+    #: tracking came from the seller rather than the PayPal record. Rebuilding
+    #: Facts without it would change the payload and refuse the approval.
+    seller_input: SellerEvidenceInput | None = None
 
 
 @dataclass(frozen=True)
@@ -121,30 +127,35 @@ class ExecutionResult:
 def build_evidence_payload(facts: Facts) -> dict[str, Any]:
     """Build the evidence body from Facts alone, via a fixed template.
 
-    Only the tracking carrier and number are interpolated, and only when both
-    are confirmed facts drawn from the PayPal record. No claim form, no model
-    output and no buyer text has a path into this function.
+    Only the carrier, the tracking number and an asserted delivery date are
+    interpolated, each from a usable Fact — confirmed by the PayPal record or
+    asserted by the seller through the validated SellerEvidenceInput schema.
+    No claim form, no model output and no buyer text has a path in here.
     """
     if not isinstance(facts, Facts):
         raise ValueError("evidence payload requires Facts")
 
     for name in ("tracking_carrier", "tracking_number"):
-        if facts.status(name) is not FactStatus.CONFIRMED:
-            raise ValueError(f"cannot build evidence payload: {name} is not confirmed")
+        if not facts.get(name).is_usable:
+            raise ValueError(f"cannot build evidence payload: {name} is not usable")
+
+    carrier = facts.value("tracking_carrier")
+    number = facts.value("tracking_number")
+
+    tracking_entry: dict[str, Any] = {"carrier_name": carrier, "tracking_number": number}
+
+    # The seller's delivery date, when asserted. Nothing else from the
+    # seller's submission reaches the payload.
+    delivered_on = facts.value("delivered_on")
+    if delivered_on:
+        tracking_entry["delivered_date"] = delivered_on
 
     return {
         "evidences": [
             {
                 "evidence_type": "PROOF_OF_FULFILLMENT",
-                "evidence_info": {
-                    "tracking_info": [
-                        {
-                            "carrier_name": facts.value("tracking_carrier"),
-                            "tracking_number": facts.value("tracking_number"),
-                        }
-                    ]
-                },
-                "notes": EVIDENCE_NOTE,
+                "evidence_info": {"tracking_info": [tracking_entry]},
+                "notes": EVIDENCE_NOTE_TEMPLATE.format(carrier=carrier, number=number),
             }
         ]
     }
@@ -267,7 +278,11 @@ def execute(approval: Approval, deps: ExecutorDeps) -> ExecutionResult:
 
     # (c) fresh policy check against the fresh record
     try:
-        facts = build_facts(snapshot, expected_dispute_id=approval.dispute_id)
+        facts = build_facts(
+            snapshot,
+            seller_input=deps.seller_input,
+            expected_dispute_id=approval.dispute_id,
+        )
     except FactsIntegrityError:
         log("execute.refused:" + REASON_FACTS_FAILED, OriginTag.PAYPAL_RECORD)
         return ExecutionResult(

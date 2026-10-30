@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from .claim_form import ClaimForm
+from .discrepancy import detect_discrepancy
 from .facts import Facts, FactStatus
 
 # The complete universe of actions v3 policy may ever permit. Refunds,
@@ -64,6 +65,7 @@ FLAG_NO_EVIDENCE_AVAILABLE = "no_evidence_available"
 FLAG_DEADLINE_PASSED = "deadline_passed"
 FLAG_ALREADY_DONE = "already_done"
 FLAG_REFUNDS_NOT_IMPLEMENTED = "refunds_not_implemented"
+FLAG_DISCREPANCY = "discrepancy_detected"
 
 
 def _utc_now() -> datetime:
@@ -226,10 +228,17 @@ def decide(
     if PROOF_OF_FULFILLMENT not in requested:
         blocking.append("proof_of_fulfillment_not_requested")
 
+    # Tracking from either source is enough to submit evidence, but a
+    # conflict between the two sources is not: that needs a human.
+    conflicting_evidence_facts = [
+        name for name in EVIDENCE_FACTS if facts.status(name) is FactStatus.CONFLICTING
+    ]
+    if conflicting_evidence_facts:
+        blocking.append("tracking_conflicting:" + ",".join(sorted(conflicting_evidence_facts)))
+        flags.add(FLAG_FACTS_CONFLICTING)
+
     missing_evidence_facts = [
-        name
-        for name in EVIDENCE_FACTS
-        if facts.status(name) is not FactStatus.CONFIRMED
+        name for name in EVIDENCE_FACTS if not facts.get(name).is_usable
     ]
     if missing_evidence_facts:
         blocking.append("tracking_unavailable:" + ",".join(sorted(missing_evidence_facts)))
@@ -247,13 +256,28 @@ def decide(
 
     if blocking:
         reasons.extend(sorted(blocking))
-        if FLAG_NO_EVIDENCE_AVAILABLE in flags or FLAG_DEADLINE_PASSED in flags:
+        if (
+            FLAG_NO_EVIDENCE_AVAILABLE in flags
+            or FLAG_DEADLINE_PASSED in flags
+            or FLAG_FACTS_CONFLICTING in flags
+        ):
             flags.add(FLAG_NEEDS_HUMAN_REVIEW)
         return PolicyDecision(
             allowed_actions=frozenset(), reasons=tuple(reasons), flags=frozenset(flags)
         )
 
-    reasons.append("proof_of_fulfillment_requested_and_tracking_confirmed")
+    reasons.append(f"tracking_available_from:{facts.source('tracking_number')}")
+    reasons.append("proof_of_fulfillment_requested_and_tracking_available")
+
+    # A discrepancy is surfaced for review but does not veto a submission the
+    # seller has approved: the seller is entitled to put their evidence in
+    # front of PayPal even when it contradicts the buyer's account.
+    discrepancy = detect_discrepancy(facts)
+    if discrepancy is not None:
+        reasons.append("discrepancy_detected")
+        flags.add(FLAG_DISCREPANCY)
+        flags.add(FLAG_NEEDS_HUMAN_REVIEW)
+
     allowed = frozenset({PROVIDE_EVIDENCE})
 
     # Backstop: nothing outside the universe, and never a money-moving action.

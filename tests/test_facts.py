@@ -67,11 +67,22 @@ def test_every_fact_carries_provenance(snapshot):
     assert set(facts.facts) == set(FACT_NAMES)
     for name, fact in facts.facts.items():
         assert fact.name == name
-        assert fact.source == "paypal_record"
+        assert fact.source in {"paypal_record", "seller_input"}
         assert fact.retrieved_at is not None
         assert fact.status in set(FactStatus)
         if fact.status is FactStatus.CONFIRMED:
+            assert fact.source == "paypal_record", "only the record can confirm"
             assert fact.entity_id in {DISPUTE_ID, SELLER_TRANSACTION_ID}
+
+
+def test_without_seller_input_every_confirmed_fact_is_paypal_sourced(snapshot):
+    facts = build_facts(snapshot)
+
+    # The seller-only facts exist but are unavailable, not negative.
+    for name in ("delivery_status", "delivered_on"):
+        assert facts.status(name) is FactStatus.UNAVAILABLE
+        assert facts.get(name).source == "seller_input"
+        assert facts.value(name) is None
 
 
 # -- hostile text never arrives ----------------------------------------
