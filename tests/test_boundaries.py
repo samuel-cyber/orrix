@@ -185,8 +185,113 @@ def test_reader_requests_no_tools_or_function_calling():
     )
 
 
-def test_no_module_outside_executor_and_paypal_names_a_write_endpoint():
-    """Nothing may address a PayPal action endpoint yet."""
+# -- write capability ---------------------------------------------------
+
+# Modules that must never be able to write to PayPal.
+NO_WRITE_CAPABILITY = (
+    "reader.py",
+    "facts.py",
+    "claim_form.py",
+    "investigator.py",
+    "policy.py",
+    "approval.py",
+    "audit.py",
+    "webhooks.py",
+    "poller.py",
+    "store.py",
+)
+
+
+def test_only_the_executor_imports_write_capability():
+    """orrix.paypal_write may have exactly one importer."""
+    importers = []
+    for path in sorted(ORRIX_DIR.glob("*.py")):
+        imports = imported_modules(parse(path))
+        if any(name.startswith("orrix.paypal_write") for name in imports):
+            importers.append(path.name)
+
+    assert importers == ["executor.py"], (
+        f"orrix.paypal_write is imported by {importers}. Only executor.py may hold "
+        f"write capability."
+    )
+
+
+@pytest.mark.parametrize("filename", NO_WRITE_CAPABILITY)
+def test_modules_without_write_capability_do_not_import_it(filename):
+    path = ORRIX_DIR / filename
+    if not path.is_file():
+        pytest.skip(f"{filename} does not exist yet")
+
+    imports = imported_modules(parse(path))
+    offenders = sorted(
+        name
+        for name in imports
+        if name.startswith("orrix.paypal_write") or name.startswith("orrix.executor")
+    )
+    assert not offenders, (
+        f"{filename} imports {', '.join(offenders)}. Write capability belongs to "
+        f"executor.py alone."
+    )
+
+
+@pytest.mark.parametrize("filename", ("reader.py", "investigator.py"))
+def test_reader_and_investigator_cannot_create_an_approval(filename):
+    """Granting authority is a human act, not something a model path reaches."""
+    path = ORRIX_DIR / filename
+    if not path.is_file():
+        pytest.skip(f"{filename} does not exist yet")
+
+    tree = parse(path)
+    imports = imported_modules(tree)
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    } | {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+    offenders = sorted(
+        {name for name in imports if name.startswith("orrix.approval")}
+        | ({"create_approval"} if "create_approval" in called else set())
+    )
+    assert not offenders, (
+        f"{filename} reaches approval creation via {', '.join(offenders)}. Only a path "
+        f"a human actually travelled may create an Approval."
+    )
+
+
+def test_the_writer_module_names_no_live_paypal_host():
+    constants = string_constants(parse(ORRIX_DIR / "paypal_write.py"))
+
+    offenders = sorted(
+        value
+        for value in constants
+        if "paypal.com" in value.lower() and "api-m.sandbox.paypal.com" not in value
+    )
+    assert not offenders, f"paypal_write.py names a non-sandbox host: {offenders}"
+
+
+def test_policy_consults_no_model():
+    """Policy is plain code; it may not reach any model client."""
+    tree = parse(ORRIX_DIR / "policy.py")
+    imports = imported_modules(tree)
+
+    offenders = sorted(
+        name
+        for name in imports
+        if any(
+            bad in name.lower()
+            for bad in ("anthropic", "openai", "orrix.reader", "requests", "httpx")
+        )
+    )
+    assert not offenders, f"policy.py imports {offenders}; it must be plain code."
+
+
+def test_only_paypal_write_names_a_write_endpoint():
+    """One module may address a PayPal action endpoint, and only one."""
     write_paths = (
         "provide-evidence",
         "accept-claim",
@@ -197,6 +302,8 @@ def test_no_module_outside_executor_and_paypal_names_a_write_endpoint():
     offenders: dict[str, list[str]] = {}
 
     for path in sorted(ORRIX_DIR.glob("*.py")):
+        if path.name == "paypal_write.py":
+            continue
         constants = string_constants(parse(path))
         hits = sorted(
             value for value in constants if any(write in value for write in write_paths)
@@ -204,4 +311,20 @@ def test_no_module_outside_executor_and_paypal_names_a_write_endpoint():
         if hits:
             offenders[path.name] = hits
 
-    assert not offenders, f"PayPal write endpoints referenced: {offenders}"
+    assert not offenders, (
+        f"PayPal write endpoints referenced outside paypal_write.py: {offenders}"
+    )
+
+
+def test_the_only_write_endpoint_is_provide_evidence():
+    """paypal_write.py must offer no money-moving endpoint."""
+    constants = string_constants(parse(ORRIX_DIR / "paypal_write.py"))
+    forbidden = ("accept-claim", "make-offer", "/escalate", "send-message", "/refund")
+
+    offenders = sorted(
+        value for value in constants if any(bad in value for bad in forbidden)
+    )
+    assert not offenders, (
+        f"paypal_write.py names a money-moving endpoint: {offenders}. v3 submits "
+        f"evidence and nothing else."
+    )
