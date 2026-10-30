@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Orrix{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="wordmark">Orrix</span>
+      <span class="badge badge-sandbox" title="Orrix never touches real money">Sandbox</span>
+    </div>
+    {% if request.cookies.get('orrix_session') %}
+    <nav class="topnav">
+      <a href="/cases" class="{% if request.url.path.startswith('/cases') %}current{% endif %}">Cases</a>
+      <a href="/audit" class="{% if request.url.path.startswith('/audit') %}current{% endif %}">Audit</a>
+      <form method="post" action="/logout" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-quiet">Sign out</button>
+      </form>
+    </nav>
+    {% endif %}
+  </header>
+
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>Sandbox only &middot; no real money moves</span>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

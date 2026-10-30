@@ -395,6 +395,84 @@ def test_the_discrepancy_detector_consults_no_model():
     assert not offenders, f"discrepancy.py imports {offenders}; it must be plain code."
 
 
+WEB_DIR = ORRIX_DIR / "web"
+
+
+def test_no_web_module_imports_write_capability():
+    """The UI may ask the executor to act; it may not hold the capability."""
+    offenders: dict[str, list[str]] = {}
+
+    for path in sorted(WEB_DIR.rglob("*.py")):
+        imports = imported_modules(parse(path))
+        hits = sorted(name for name in imports if "paypal_write" in name)
+        if hits:
+            offenders[str(path.relative_to(ORRIX_DIR))] = hits
+
+    assert not offenders, (
+        f"web code imports write capability: {offenders}. Only orrix.executor may "
+        f"import orrix.paypal_write; the web layer goes through executor.build_writer."
+    )
+
+
+def test_paypal_write_still_has_exactly_one_importer():
+    """Repeated over the whole package, web included."""
+    importers = []
+    for path in sorted(ORRIX_DIR.rglob("*.py")):
+        imports = imported_modules(parse(path))
+        if any(name.startswith("orrix.paypal_write") for name in imports):
+            importers.append(str(path.relative_to(ORRIX_DIR)))
+
+    assert importers == ["executor.py"], (
+        f"orrix.paypal_write is imported by {importers}; expected executor.py alone."
+    )
+
+
+def test_the_pipeline_holds_no_write_capability():
+    imports = imported_modules(parse(ORRIX_DIR / "pipeline.py"))
+
+    offenders = sorted(
+        name for name in imports if "paypal_write" in name or name.startswith("orrix.executor")
+    )
+    assert not offenders, (
+        f"pipeline.py imports {offenders}. The pipeline observes and records; it "
+        f"never writes."
+    )
+
+
+def test_config_is_the_only_module_that_reads_the_environment():
+    """Env reads are centralised so credentials have one entry point."""
+    allowed = {"config.py", "store.py", "poller.py", "paypal.py"}
+    offenders: dict[str, list[str]] = {}
+
+    for path in sorted(ORRIX_DIR.rglob("*.py")):
+        name = str(path.relative_to(ORRIX_DIR))
+        if name in allowed:
+            continue
+        hits = sorted(
+            attribute
+            for attribute in dotted_attribute_calls(parse(path))
+            if attribute in ("os.environ", "os.getenv")
+        )
+        if hits:
+            offenders[name] = hits
+
+    assert not offenders, (
+        f"modules reading the environment directly: {offenders}. New code takes a "
+        f"config object; orrix/config.py is where the environment is read."
+    )
+
+
+def test_policy_and_reader_agree_on_did_not_run_reasons():
+    """policy duplicates these literals rather than importing the reader."""
+    from orrix.policy import DID_NOT_RUN_REASONS as policy_reasons
+    from orrix.reader import DID_NOT_RUN_REASONS as reader_reasons
+
+    assert policy_reasons == reader_reasons, (
+        "orrix/policy.py and orrix/reader.py disagree about which reader reasons "
+        "mean 'did not run'. Keep the literals in step."
+    )
+
+
 def test_seller_input_has_no_free_text_field():
     """Enforced in the source, not only in the model's behaviour."""
     from orrix.seller_input import SellerEvidenceInput

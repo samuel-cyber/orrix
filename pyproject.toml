@@ -16,13 +16,18 @@ dependencies = [
     "pydantic",
     "requests",
     "python-dotenv",
+    "jinja2",
+    "python-multipart",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "httpx"]
 
 [tool.setuptools]
 packages = ["orrix", "orrix.web"]
+
+[tool.setuptools.package-data]
+"orrix.web" = ["templates/*.html", "templates/partials/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

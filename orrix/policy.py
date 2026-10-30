@@ -55,6 +55,12 @@ REQUIRED_DISPUTE_STATE = "REQUIRED_ACTION"
 ALLOWED_STAGES = frozenset({"INQUIRY"})
 PROOF_OF_FULFILLMENT = "PROOF_OF_FULFILLMENT"
 
+# Reader reasons that mean the reader never ran, as opposed to ran and
+# failed. Duplicated as literals rather than imported: policy must not
+# import the reader, and tests/test_boundaries.py enforces that. Kept in
+# step with orrix.reader by test_policy_and_reader_agree_on_did_not_run.
+DID_NOT_RUN_REASONS = frozenset({"reader_not_configured", "no_buyer_text"})
+
 _TIMESTAMP_FORMATS = ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z")
 
 # Flags
@@ -126,18 +132,31 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 
 def _needs_review(claim_input: Any) -> bool:
-    """True when the reader could not produce a usable form.
+    """True when the reader ran and could not produce a usable form.
 
-    A ClaimForm is fine. None means a fact-only re-check with no reader
-    involvement, which is what the executor does. Anything else — a
-    ReaderResult that is not ok, or an unexpected object — fails closed.
+    A ClaimForm is fine. None means a fact-only check with no reader
+    involvement, which is what the executor does.
+
+    A reader that never ran is distinct from one that ran and failed. No
+    model configured, or no buyer text to read, is an operational absence
+    and leaves the fact-based rules to decide — the evidence path does not
+    depend on the reader, since the payload is built from Facts. A reader
+    that did run and returned unparseable or invalid output is a signal
+    something is wrong, and blocks.
+
+    Either way the reader can only ever block. It can never enable an action.
     """
     if claim_input is None or isinstance(claim_input, ClaimForm):
         return False
+
     status = getattr(claim_input, "status", None)
     form = getattr(claim_input, "form", None)
     if status == "ok" and isinstance(form, ClaimForm):
         return False
+
+    if getattr(claim_input, "reason", None) in DID_NOT_RUN_REASONS:
+        return False
+
     return True
 
 

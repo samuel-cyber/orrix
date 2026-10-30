@@ -55,6 +55,12 @@ REASON_RATE_LIMITED = "rate_limited"
 REASON_HTTP_ERROR = "http_error"
 REASON_TRANSPORT_ERROR = "transport_error"
 REASON_NO_BUYER_TEXT = "no_buyer_text"
+#: No model is configured, so the reader never ran. An operational absence,
+#: not suspicious output: policy treats it as "no reader input" rather than
+#: as a reader that failed. See policy._needs_review.
+REASON_NOT_CONFIGURED = "reader_not_configured"
+#: Reasons that mean the reader did not run at all.
+DID_NOT_RUN_REASONS = frozenset({REASON_NOT_CONFIGURED, REASON_NO_BUYER_TEXT})
 
 STATUS_OK = "ok"
 STATUS_NEEDS_REVIEW = "needs_review"

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Cases &middot; Orrix{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/styles/ag-grid.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/styles/ag-theme-quartz.min.css">
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dispute queue</h1>
+    <p class="muted">Sorted by deadline. Click a row to open the case file.</p>
+  </div>
+  <div class="legend">
+    <span class="chip chip-confirmed">tracking: yes</span>
+    <span class="chip chip-seller">seller-asserted</span>
+    <span class="chip chip-unavailable">no</span>
+  </div>
+</div>
+
+<div id="cases-grid" class="ag-theme-quartz grid"></div>
+<p id="cases-empty" class="muted empty-note" hidden>
+  No disputes stored yet. Orrix fills this from webhooks and the polling fallback.
+</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/dist/ag-grid-community.min.js"></script>
+<script src="/static/cases.js"></script>
+{% endblock %}

@@ -13,12 +13,15 @@ from fastapi.testclient import TestClient
 from orrix import store, webhooks
 from orrix.approval import DisputeVersion, create_approval
 from orrix.audit import AuditConfig, AuditLog
+from orrix.config import AppConfig
 from orrix.executor import ExecutedApprovals, ExecutorDeps, build_evidence_payload
 from orrix.facts import build_facts
-from orrix.main import app
+from orrix.main import create_app
 from orrix.paypal import MissingSignatureHeaders, VerificationResult
 from orrix.paypal_write import WriteResult
 from orrix.policy import PROVIDE_EVIDENCE, PolicyConfig
+
+ADMIN_PASSWORD = "test-admin-password"
 
 SIGNATURE_HEADERS = {
     "PAYPAL-AUTH-ALGO": "SHA256withRSA",
@@ -121,20 +124,61 @@ def make_event(
     }
 
 
+class NoNetworkClient:
+    """Installed around every test so a missing fake fails loudly.
+
+    Leaving the module client as None let the next caller construct a real
+    SandboxPayPalClient from .env and hit the live sandbox. This raises
+    instead, so a test that forgets its fake fails rather than making a
+    network call.
+    """
+
+    def __getattr__(self, name):
+        raise AssertionError(
+            f"PayPal client was called ({name}) without a fake installed. "
+            f"Tests must never reach the network: call webhooks.set_client(fake)."
+        )
+
+
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("ORRIX_DB_PATH", str(tmp_path / "test.db"))
     # The background poller must never start during tests: it would reach for
     # real credentials and make a real sandbox call.
     monkeypatch.setenv("POLLER_ENABLED", "false")
+    webhooks.set_client(NoNetworkClient())
     store.init_db()
     yield
-    webhooks.set_client(None)
+    webhooks.set_client(NoNetworkClient())
+
+
+def test_app_config(tmp_path, **overrides):
+    """An AppConfig for tests: temp database, no poller, no model."""
+    settings = {
+        "db_path": str(tmp_path / "test.db"),
+        "admin_password": ADMIN_PASSWORD,
+        "session_secret": "test-session-secret",
+        "poller_enabled": False,
+        "reader_api_key": None,
+        "secure_cookies": False,
+    }
+    settings.update(overrides)
+    return AppConfig(**settings)
 
 
 @pytest.fixture
-def client():
-    with TestClient(app) as test_client:
+def app_config(tmp_path):
+    return test_app_config(tmp_path)
+
+
+@pytest.fixture
+def client(app_config):
+    """A TestClient over an app built from a test config.
+
+    Built here rather than imported from orrix.main, so no test ever runs
+    against configuration read from the real environment.
+    """
+    with TestClient(create_app(config=app_config)) as test_client:
         yield test_client
 
 

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Not found &middot; Orrix{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>No such case</h1>
+  <p>
+    Orrix holds no stored snapshot for
+    <span class="mono">{{ dispute_id }}</span>.
+  </p>
+  <p class="muted">
+    Cases arrive by webhook or from the polling fallback. If this dispute is
+    new, wait for the next poll.
+  </p>
+  <p><a href="/cases" class="btn">Back to cases</a></p>
+</section>
+{% endblock %}

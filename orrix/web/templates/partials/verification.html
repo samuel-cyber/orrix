@@ -1,0 +1,21 @@
+{% if verification %}
+<div class="alert {% if verification.ok %}alert-ok{% else %}alert-error{% endif %}" role="status">
+  {% if verification.ok %}
+  <strong>Chain OK</strong>
+  <p>
+    {{ verification.entries }} entries verified
+    {% if verification.keyed %}with HMAC{% else %}with plain SHA-256{% endif %}
+    at {{ verification.checked_at }}.
+  </p>
+  {% if not verification.keyed %}
+  <p class="muted small">
+    No AUDIT_HMAC_KEY is set, so a forger with database access could produce a
+    chain that verifies. See docs/THREAT_MODEL.md.
+  </p>
+  {% endif %}
+  {% else %}
+  <strong>Chain broken</strong>
+  <p>First bad sequence: <span class="mono">{{ verification.bad_seq }}</span>.</p>
+  {% endif %}
+</div>
+{% endif %}

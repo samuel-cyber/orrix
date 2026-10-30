@@ -10,7 +10,12 @@ from typing import Any, Callable, Mapping
 from .approval import Approval, DisputeVersion
 from .audit import AuditLog, OriginTag, hash_payload
 from .facts import Facts, FactsIntegrityError, FactStatus, build_facts
-from .paypal_write import PayPalWriteError, SandboxPayPalWriter
+from .paypal_write import (
+    SANDBOX_BASE_URL,
+    PayPalWriteConfig,
+    PayPalWriteError,
+    SandboxPayPalWriter,
+)
 from .policy import PROVIDE_EVIDENCE, CaseState, PolicyConfig, decide
 from .seller_input import SellerEvidenceInput
 
@@ -122,6 +127,25 @@ class ExecutionResult:
     @property
     def executed(self) -> bool:
         return self.status == STATUS_EXECUTED
+
+
+def build_writer(
+    token_provider: Callable[[], str],
+    base_url: str = SANDBOX_BASE_URL,
+    timeout: float = 60.0,
+    session: Any | None = None,
+) -> SandboxPayPalWriter:
+    """Construct the writer. The only factory for write capability.
+
+    Callers that need a writer go through here rather than importing
+    orrix.paypal_write, which keeps write capability in exactly one module.
+    tests/test_boundaries.py enforces that.
+    """
+    return SandboxPayPalWriter(
+        config=PayPalWriteConfig(base_url=base_url, timeout=timeout),
+        token_provider=token_provider,
+        session=session,
+    )
 
 
 def build_evidence_payload(facts: Facts) -> dict[str, Any]:

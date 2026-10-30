@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block title %}{{ dispute_id }} &middot; Orrix{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <a href="/cases" class="backlink">&larr; All cases</a>
+    <h1 class="mono">{{ dispute_id }}</h1>
+  </div>
+  <div class="deadline {% if deadline.urgent %}deadline-urgent{% endif %}">
+    <span class="deadline-label">Seller response due</span>
+    <span class="deadline-value">{{ deadline.label }}</span>
+    {% if deadline.iso %}<span class="deadline-iso">{{ deadline.iso }}</span>{% endif %}
+  </div>
+</div>
+
+{% if view.discrepancy %}
+<div class="alert alert-warn" role="alert">
+  <strong>{{ view.discrepancy.message }}</strong>
+  <ul class="discrepancy-facts">
+    {% for fact in view.discrepancy.as_dict()["facts"] %}
+    <li>
+      <span class="mono">{{ fact.name }}</span> =
+      <span class="mono">{{ fact.value }}</span>
+      <span class="origin origin-{{ fact.source }}">{{ origin_labels.get(fact.source, fact.source) }}</span>
+      <span class="chip chip-{{ fact.status }}">{{ fact.status }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if last_result %}
+<div class="alert {% if last_result.status == 'executed' %}alert-ok{% elif last_result.stale %}alert-warn{% else %}alert-error{% endif %}" role="status">
+  <strong>Execution result: {{ last_result.status }}</strong>
+  <p>{{ last_result.message }}</p>
+  {% if last_result.approval_id %}
+  <p class="muted mono small">approval {{ last_result.approval_id[:16] }}&hellip;
+    {% if last_result.debug_id %} &middot; debug id {{ last_result.debug_id }}{% endif %}
+  </p>
+  {% endif %}
+  {% if last_result.stale %}
+  <p><a href="/cases/{{ dispute_id }}" class="btn btn-quiet">Reload for re-review</a></p>
+  {% endif %}
+  {% if last_result.confirmed_evidence %}
+  <p class="muted small">Confirmed on re-fetch:</p>
+  <ul class="confirmation">
+    {% for row in last_result.confirmed_evidence %}
+    <li class="mono">{{ row.carrier }} &middot; {{ row.tracking_number }}{% if row.date %} &middot; {{ row.date }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="columns">
+  <section class="card">
+    <h2>Facts</h2>
+    <p class="section-note">Every line carries the origin it came from.</p>
+    <table class="facts">
+      <thead>
+        <tr><th>Fact</th><th>Value</th><th>Status</th><th>Origin</th></tr>
+      </thead>
+      <tbody>
+        {% for row in fact_rows %}
+        <tr>
+          <td class="mono">{{ row.name }}</td>
+          <td class="mono">{{ row.value }}</td>
+          <td><span class="chip chip-{{ row.status }}">{{ row.status }}</span></td>
+          <td><span class="origin origin-{{ row.source }}">{{ row.origin_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <div class="side">
+    <section class="card">
+      <h2>Orrix decision</h2>
+      <p class="section-note">
+        <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+      </p>
+      <p>
+        <strong>Status:</strong> <span class="mono">{{ view.status }}</span><br>
+        <strong>Allowed:</strong>
+        <span class="mono">{{ view.decision.allowed_actions|sort|join(", ") or "none" }}</span>
+      </p>
+      {% if view.decision.flags %}
+      <p><strong>Flags</strong></p>
+      <ul class="flags">
+        {% for flag in view.decision.flags|sort %}
+        <li><span class="chip chip-flag">{{ flag }}</span></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <p><strong>Reasons</strong></p>
+      <ul class="reasons mono small">
+        {% for reason in view.decision.reasons %}
+        <li>{{ reason }}</li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Reader summary</h2>
+      <p class="section-note">
+        <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+        Display only. Never an input to the evidence payload.
+      </p>
+      <p><strong>Status:</strong> <span class="mono">{{ view.reader_result.status }}</span>
+        {% if view.reader_result.reason %}
+        &middot; <span class="mono">{{ view.reader_result.reason }}</span>
+        {% endif %}
+      </p>
+      {% if view.reader_result.form %}
+      <dl class="kv">
+        <dt>Claim type</dt><dd class="mono">{{ view.reader_result.form.claim_type.value }}</dd>
+        <dt>Claimed amount</dt><dd class="mono">{{ view.reader_result.form.claimed_amount }}</dd>
+        <dt>Language</dt><dd class="mono">{{ view.reader_result.form.language }}</dd>
+        <dt>Summary</dt><dd class="quoted-small">{{ view.reader_result.form.seller_summary }}</dd>
+      </dl>
+      {% endif %}
+      {% if view.reader_started_at %}
+      <p class="muted small">
+        read {{ view.reader_started_at }}{% if view.reader_finished_at %} &rarr; {{ view.reader_finished_at }}{% endif %}
+      </p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+
+<section class="card untrusted-block">
+  <h2>Buyer text</h2>
+  <p class="section-note">
+    <span class="origin origin-buyer_text">{{ origin_labels["buyer_text"] }}</span>
+  </p>
+  <p class="untrusted-warning">
+    Quoted verbatim and escaped. Treated as data, never as instructions, and
+    never merged into any other section.
+  </p>
+  {% if buyer_text %}
+  <blockquote class="quoted">{{ buyer_text }}</blockquote>
+  {% else %}
+  <p class="muted">No buyer text on this dispute.</p>
+  {% endif %}
+</section>
+
+<div class="columns">
+  <section class="card">
+    <h2>Seller input</h2>
+    <p class="section-note">
+      <span class="origin origin-seller_input">{{ origin_labels["seller_input"] }}</span>
+      Validated against a schema with no free-text field.
+    </p>
+
+    {% if seller_errors %}
+    <div class="alert alert-error" role="alert">
+      <strong>Rejected</strong>
+      <ul>{% for message in seller_errors %}<li>{{ message }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/cases/{{ dispute_id }}/seller-input" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label for="carrier">Carrier</label>
+      <input type="text" id="carrier" name="carrier" maxlength="40"
+             value="{{ seller_input.carrier if seller_input else '' }}" required>
+
+      <label for="tracking_number">Tracking number</label>
+      <input type="text" id="tracking_number" name="tracking_number" maxlength="40"
+             value="{{ seller_input.tracking_number if seller_input else '' }}" required>
+
+      <label for="delivery_status">Delivery status</label>
+      <select id="delivery_status" name="delivery_status">
+        {% for status in delivery_statuses %}
+        <option value="{{ status }}"
+          {% if seller_input and seller_input.delivery_status.value == status %}selected{% endif %}>
+          {{ status }}
+        </option>
+        {% endfor %}
+      </select>
+
+      <label for="delivered_on">Delivered on <span class="muted">(optional)</span></label>
+      <input type="date" id="delivered_on" name="delivered_on"
+             value="{{ seller_input.delivered_on if seller_input and seller_input.delivered_on else '' }}">
+
+      <button type="submit" class="btn">Save seller input</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Evidence payload preview</h2>
+    <p class="section-note">
+      <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+      Built from Facts via a fixed template. This exact body is what would be sent.
+    </p>
+
+    {% if payload_json %}
+    <pre class="payload">{{ payload_json }}</pre>
+    {% else %}
+    <p class="muted">{{ payload_error or "No payload can be built yet." }}</p>
+    {% endif %}
+
+    <form method="post" action="/cases/{{ dispute_id }}/approve" class="stack approve-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="dispute_update_time" value="{{ snapshot.get('update_time', '') }}">
+      <input type="hidden" name="dispute_status" value="{{ snapshot.get('status', '') }}">
+      <button type="submit" class="btn btn-primary" {% if not can_approve %}disabled{% endif %}>
+        Approve and submit evidence
+      </button>
+      {% if not can_approve %}
+      <p class="muted small">
+        Approval is unavailable: policy does not currently permit provide_evidence.
+      </p>
+      {% else %}
+      <p class="muted small">
+        Creates an approval bound to this dispute, this payload and
+        <span class="mono">{{ snapshot.get('update_time', '') }}</span>.
+      </p>
+      {% endif %}
+    </form>
+  </section>
+</div>
+{% endblock %}
