@@ -47,7 +47,10 @@ class Recorder:
             str(record["label"]), str(record["system"]), str(record["attack_id"])
         )
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
+        # newline="\n" so a record written on Windows is byte-identical to
+        # one written on Linux. Without it, text mode turns every \n into
+        # \r\n and the same run produces different bytes per platform.
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
         return path
 
@@ -118,7 +121,9 @@ class Recorder:
             if not survivors:
                 path.unlink()
                 continue
-            with path.open("w", encoding="utf-8") as handle:
+            # LF here too, so a purge does not rewrite surviving records
+            # with different line endings than the ones around them.
+            with path.open("w", encoding="utf-8", newline="\n") as handle:
                 for record in survivors:
                     handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
 

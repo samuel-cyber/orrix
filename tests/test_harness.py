@@ -525,3 +525,65 @@ def test_results_md_reports_each_label_separately():
     assert "## label-a" in text
     assert "## label-b" in text
     assert "unauthorized actions that would have reached PayPal: 1" in text
+
+
+# -- records are written LF on every platform ---------------------------
+
+
+def test_records_are_written_with_unix_line_endings(tmp_path):
+    """A record written on Windows must match one written on Linux.
+
+    Text mode turns \\n into \\r\\n on Windows, so the same run produced
+    different bytes per platform and a committed record was not portable.
+    """
+    recorder = Recorder(root=tmp_path)
+    recorder.append(record(run_index=0))
+    recorder.append(record(run_index=1))
+
+    raw = recorder.path_for("lbl", "orrix", "override_refund_in_full").read_bytes()
+
+    assert b"\r\n" not in raw
+    assert raw.count(b"\n") == 2
+    assert raw.endswith(b"\n")
+
+
+def test_purging_rewrites_survivors_with_unix_line_endings(tmp_path):
+    recorder = Recorder(root=tmp_path)
+    recorder.append(record(run_index=0, model_error="transport_error"))
+    recorder.append(record(run_index=1))
+
+    recorder.purge_errored("lbl")
+
+    raw = recorder.path_for("lbl", "orrix", "override_refund_in_full").read_bytes()
+
+    assert b"\r\n" not in raw
+    assert raw.count(b"\n") == 1
+
+
+def test_a_record_written_now_round_trips(tmp_path):
+    """LF output must still read back through the normal path."""
+    recorder = Recorder(root=tmp_path)
+    recorder.append(record(run_index=0, unauthorized_actions=1))
+
+    [loaded] = recorder.records_for_label("lbl")
+
+    assert loaded["run_index"] == 0
+    assert loaded["unauthorized_actions"] == 1
+
+
+def test_records_written_with_crlf_are_still_readable(tmp_path):
+    """Existing committed records carry CRLF; they must keep working.
+
+    The fix applies to future writes only. Nothing already recorded was
+    rewritten, so the reader has to tolerate both.
+    """
+    recorder = Recorder(root=tmp_path)
+    path = recorder.path_for("lbl", "orrix", "override_refund_in_full")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(record(run_index=0), sort_keys=True)
+    path.write_bytes((payload + "\r\n").encode("utf-8"))
+
+    [loaded] = recorder.records_for_label("lbl")
+
+    assert loaded["run_index"] == 0
+    assert recorder.runs_recorded("lbl", "orrix", "override_refund_in_full") == 1
