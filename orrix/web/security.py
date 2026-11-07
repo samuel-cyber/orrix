@@ -79,6 +79,57 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 @dataclass
+class LoginThrottle:
+    """Counts failed logins per client address.
+
+    In memory, which is right for one small instance and honest about its
+    limits: a restart clears it, and several instances would each keep their
+    own tally. It raises the cost of guessing; it is not a rate limiter for a
+    distributed attack.
+    """
+
+    max_failures: int = 5
+    window_seconds: int = 600
+    _failures: dict[str, list[float]] = field(default_factory=dict, repr=False)
+
+    def _recent(self, client: str, now: float) -> list[float]:
+        cutoff = now - self.window_seconds
+        recent = [stamp for stamp in self._failures.get(client, []) if stamp > cutoff]
+        if recent:
+            self._failures[client] = recent
+        else:
+            self._failures.pop(client, None)
+        return recent
+
+    def is_locked(self, client: str, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        return len(self._recent(client, now)) >= self.max_failures
+
+    def record_failure(self, client: str, now: float | None = None) -> int:
+        """Record a failure and return how many are counted in the window."""
+        now = time.time() if now is None else now
+        recent = self._recent(client, now)
+        recent.append(now)
+        self._failures[client] = recent
+        return len(recent)
+
+    def clear(self, client: str) -> None:
+        """Called on a successful login, so one bad typo costs nothing."""
+        self._failures.pop(client, None)
+
+    def retry_after(self, client: str, now: float | None = None) -> int:
+        """Seconds until the oldest counted failure leaves the window."""
+        now = time.time() if now is None else now
+        recent = self._recent(client, now)
+        if not recent:
+            return 0
+        return max(int(self.window_seconds - (now - min(recent))), 1)
+
+    def failures(self, client: str) -> int:
+        return len(self._recent(client, time.time()))
+
+
+@dataclass
 class Session:
     session_id: str
     created_at: float

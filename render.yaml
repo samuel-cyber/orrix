@@ -1,0 +1,109 @@
+# Render Blueprint for Orrix.
+#
+# SANDBOX ONLY. This deploys a console that talks to
+# api-m.sandbox.paypal.com. Do not point it at live PayPal credentials.
+#
+# Two things to know before deploying:
+#
+#   1. The persistent disk below REQUIRES A PAID INSTANCE. Render does not
+#      offer disks on the free plan. Without a disk, the SQLite database
+#      lives on ephemeral storage and every deploy or restart wipes the
+#      audit chain, the stored disputes and the executed-approval record --
+#      which would let an already-executed approval run a second time.
+#
+#   2. FREE INSTANCES SLEEP after inactivity and cold-start on the next
+#      request. A sleeping instance runs no poller, so disputes are not
+#      picked up until someone opens the page, and an incoming PayPal
+#      webhook may time out before the instance wakes. For anything beyond
+#      a demo, use a paid instance.
+#
+# Deploy: push this repo, then in Render choose New > Blueprint and point it
+# at the repository. Every value marked `sync: false` must be filled in by
+# hand in the Render dashboard; none of them are stored in git.
+
+services:
+  - type: web
+    name: orrix
+    runtime: python
+    plan: starter # a paid plan: required for the disk below
+    region: frankfurt
+    branch: main
+
+    buildCommand: pip install --upgrade pip && pip install -e .
+    startCommand: uvicorn orrix.main:app --host 0.0.0.0 --port $PORT
+
+    # Render polls this to decide whether the instance is live. It is the
+    # one route that answers without a session.
+    healthCheckPath: /health
+
+    # SQLite needs a real filesystem that survives a deploy. Everything
+    # Orrix persists -- the audit chain, dispute snapshots, case views and
+    # the executed-approval ledger -- lives in this one file.
+    disk:
+      name: orrix-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      # -- where the database lives -----------------------------------
+      - key: ORRIX_DB
+        value: /var/data/orrix.db
+
+      # -- deployment posture -----------------------------------------
+      # production turns on Secure cookies and makes the app refuse to
+      # start without an ADMIN_PASSWORD of at least 12 characters.
+      - key: ORRIX_ENV
+        value: production
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+
+      # -- non-secret defaults ----------------------------------------
+      - key: POLLER_ENABLED
+        value: "true"
+      - key: POLL_INTERVAL_SECONDS
+        value: "60"
+
+      # -- secrets: set every one of these in the Render dashboard ----
+      # sync: false means Render will not read a value from this file and
+      # will prompt for it instead, so nothing secret is ever committed.
+
+      # Console login. At least 12 characters or the app refuses to boot.
+      - key: ADMIN_PASSWORD
+        sync: false
+
+      # Signs CSRF tokens. Generate a long random value; leaving it unset
+      # works but logs everyone out on every restart.
+      - key: SESSION_SECRET
+        sync: false
+
+      # PayPal sandbox credentials.
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      # The id of the webhook registered in the PayPal sandbox dashboard.
+      # Signature verification fails against any other id, which looks
+      # exactly like a bad signature.
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+
+      # The Reader's model. Without READER_API_KEY the Reader is skipped and
+      # the fact-based evidence path still works.
+      - key: READER_API_KEY
+        sync: false
+      - key: READER_BASE_URL
+        sync: false
+      - key: READER_MODEL
+        sync: false
+
+      # Keys the audit chain with HMAC-SHA256. Store it somewhere the
+      # instance can read but the database cannot be read from -- a key
+      # sitting beside the log it protects buys very little.
+      # See docs/THREAT_MODEL.md.
+      - key: AUDIT_HMAC_KEY
+        sync: false
+
+      # Optional AG Grid Enterprise licence. Without it the grid still
+      # works and shows a watermark.
+      - key: AG_GRID_LICENSE_KEY
+        sync: false

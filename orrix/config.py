@@ -26,6 +26,18 @@ SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
 DEFAULT_DB_PATH = "orrix.db"
 DEFAULT_PORT = 8010
 
+ENV_PRODUCTION = "production"
+ENV_DEVELOPMENT = "development"
+
+#: Shortest admin password a production deployment will accept. The console
+#: sits on a public URL and holds the approval button, so a weak password is
+#: the whole trust boundary undone.
+MIN_PRODUCTION_PASSWORD_LENGTH = 12
+
+
+class ConfigError(RuntimeError):
+    """The configuration is unsafe to serve. Refuse to start."""
+
 
 def _flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -61,7 +73,14 @@ class AppConfig:
     admin_password: str | None = field(default=None, repr=False)
     session_secret: str = field(default_factory=lambda: secrets.token_hex(32), repr=False)
     session_ttl_seconds: int = 8 * 3600
-    secure_cookies: bool = False
+    #: None means "decide from the environment": on in production, off
+    #: otherwise, so local HTTP development still works.
+    secure_cookies: bool | None = None
+    environment: str = ENV_DEVELOPMENT
+    #: Failed logins allowed per client address before a 429, and the window
+    #: they are counted over.
+    login_max_failures: int = 5
+    login_lockout_seconds: int = 600
 
     # Optional AG Grid Enterprise licence. Injected into the page at render
     # time so the grid runs without a watermark. Never logged, never
@@ -86,6 +105,58 @@ class AppConfig:
     min_hours_before_deadline: float = 0.0
 
     port: int = DEFAULT_PORT
+
+    # -- deployment posture ----------------------------------------------
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() == ENV_PRODUCTION
+
+    @property
+    def use_secure_cookies(self) -> bool:
+        """Secure cookies in production; explicit setting wins either way."""
+        if self.secure_cookies is not None:
+            return self.secure_cookies
+        return self.is_production
+
+    def validate(self) -> None:
+        """Refuse to serve a configuration that is unsafe on a public URL.
+
+        Called before the app starts. Messages name the variable and the
+        rule, never the value.
+        """
+        if not self.is_production:
+            return
+
+        if not self.admin_password:
+            raise ConfigError(
+                "ADMIN_PASSWORD is not set. A production deployment serves the "
+                "approval button on a public URL and will not start without one."
+            )
+        if len(self.admin_password) < MIN_PRODUCTION_PASSWORD_LENGTH:
+            raise ConfigError(
+                f"ADMIN_PASSWORD is shorter than "
+                f"{MIN_PRODUCTION_PASSWORD_LENGTH} characters. Set a longer one; "
+                f"the length is the check, the value is never logged."
+            )
+
+    def startup_summary(self) -> list[str]:
+        """Lines safe to log at startup: presence, never values."""
+        return [
+            f"environment={self.environment}",
+            f"db_path={self.db_path}",
+            f"secure_cookies={self.use_secure_cookies}",
+            f"poller_enabled={self.poller_enabled}",
+            f"poll_interval_seconds={self.poll_interval_seconds}",
+            f"admin_password_set={bool(self.admin_password)}",
+            f"paypal_credentials_set={bool(self.paypal_client_id and self.paypal_client_secret)}",
+            f"paypal_webhook_id_set={bool(self.paypal_webhook_id)}",
+            f"reader_configured={self.reader_is_configured}",
+            f"reader_model={self.reader_model}",
+            f"audit_hmac_key_set={bool(self.audit_hmac_key)}",
+            f"ag_grid_license_set={self.ag_grid_license_is_set}",
+            f"login_max_failures={self.login_max_failures}",
+        ]
 
     # -- derived service configs -----------------------------------------
 
@@ -132,7 +203,10 @@ def load_config() -> AppConfig:
     session_secret = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
 
     return AppConfig(
-        db_path=os.environ.get("ORRIX_DB_PATH", DEFAULT_DB_PATH),
+        # ORRIX_DB is what render.yaml sets, pointing at the mounted disk.
+        # ORRIX_DB_PATH stays supported for existing local setups.
+        db_path=os.environ.get("ORRIX_DB")
+        or os.environ.get("ORRIX_DB_PATH", DEFAULT_DB_PATH),
         paypal_client_id=os.environ.get("PAYPAL_CLIENT_ID"),
         paypal_client_secret=os.environ.get("PAYPAL_CLIENT_SECRET"),
         paypal_webhook_id=os.environ.get("PAYPAL_WEBHOOK_ID"),
@@ -140,7 +214,13 @@ def load_config() -> AppConfig:
         admin_password=os.environ.get("ADMIN_PASSWORD"),
         session_secret=session_secret,
         session_ttl_seconds=int(_number("SESSION_TTL_SECONDS", 8 * 3600)),
-        secure_cookies=_flag("SECURE_COOKIES", False),
+        # Unset means "follow ORRIX_ENV"; an explicit value always wins.
+        secure_cookies=(
+            _flag("SECURE_COOKIES", False) if os.environ.get("SECURE_COOKIES") else None
+        ),
+        environment=os.environ.get("ORRIX_ENV", ENV_DEVELOPMENT),
+        login_max_failures=int(_number("LOGIN_MAX_FAILURES", 5)),
+        login_lockout_seconds=int(_number("LOGIN_LOCKOUT_SECONDS", 600)),
         ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),

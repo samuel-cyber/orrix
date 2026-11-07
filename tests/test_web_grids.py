@@ -22,7 +22,7 @@ from .conftest import (
     FakeWriter,
     load_fixture,
     recorded_snapshot,
-    test_app_config,
+    build_app_config,
 )
 
 PROTECTED_NEW_PAGES = ("/evaluation",)
@@ -103,7 +103,7 @@ def build(tmp_path, snapshot=None, summary=None, notes=None, license_key=None):
     if license_key is not None:
         overrides["ag_grid_license_key"] = license_key
 
-    config = test_app_config(tmp_path, **overrides)
+    config = build_app_config(tmp_path, **overrides)
     application = create_app(
         config=config,
         paypal_reader=FakeReader([snapshot, recorded_snapshot(snapshot)]),
@@ -235,7 +235,7 @@ def test_the_licence_key_is_never_logged(tmp_path, caplog):
 
 
 def test_the_licence_key_is_hidden_from_the_config_repr(tmp_path):
-    config = test_app_config(tmp_path, ag_grid_license_key="AG-SECRET-0003")
+    config = build_app_config(tmp_path, ag_grid_license_key="AG-SECRET-0003")
 
     assert "AG-SECRET-0003" not in repr(config)
     assert config.ag_grid_license_is_set is True
@@ -308,7 +308,7 @@ def test_evaluation_handles_malformed_json(tmp_path):
     results.write_text("{not json", encoding="utf-8")
     snapshot = load_fixture()
     store.save_case_snapshot(snapshot["dispute_id"], snapshot)
-    config = test_app_config(tmp_path, results_path=str(results))
+    config = build_app_config(tmp_path, results_path=str(results))
     application = create_app(
         config=config, paypal_reader=FakeReader([snapshot]), writer=FakeWriter()
     )

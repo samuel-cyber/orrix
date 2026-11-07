@@ -201,9 +201,48 @@ def login_form(request: Request) -> Response:
     return templates.TemplateResponse(request, "login.html", _context(request, error=None))
 
 
+def _client_address(request: Request) -> str:
+    """The address to throttle on.
+
+    Render terminates TLS and forwards the caller in X-Forwarded-For, so the
+    first entry there is the client when the app sits behind that proxy. It
+    is caller-supplied and therefore spoofable: the throttle raises the cost
+    of guessing from one host, it does not stop a distributed attempt.
+    """
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded.strip():
+        return forwarded.split(",")[0].strip()
+    client = request.client
+    return client.host if client else "unknown"
+
+
 @router.post("/login")
 def login_submit(request: Request, password: str = Form("")) -> Response:
     services = _services(request)
+    client = _client_address(request)
+
+    if services.login_throttle.is_locked(client):
+        retry_after = services.login_throttle.retry_after(client)
+        logger.warning(
+            "login throttled client=%s failures=%s retry_after=%ss",
+            client,
+            services.login_throttle.failures(client),
+            retry_after,
+        )
+        response = templates.TemplateResponse(
+            request,
+            "login.html",
+            _context(
+                request,
+                error=(
+                    f"Too many failed attempts. Try again in "
+                    f"{max(retry_after // 60, 1)} minute(s)."
+                ),
+            ),
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response
 
     if not services.admin_password_hash:
         return templates.TemplateResponse(
@@ -214,7 +253,13 @@ def login_submit(request: Request, password: str = Form("")) -> Response:
         )
 
     if not services.check_password(password):
-        logger.warning("login failed")
+        failures = services.login_throttle.record_failure(client)
+        logger.warning(
+            "login failed client=%s failures=%s/%s",
+            client,
+            failures,
+            services.login_throttle.max_failures,
+        )
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -222,6 +267,9 @@ def login_submit(request: Request, password: str = Form("")) -> Response:
             status_code=401,
         )
 
+    # A correct password clears the tally, so one mistyped attempt costs
+    # nothing once the right one lands.
+    services.login_throttle.clear(client)
     session = services.sessions.create()
     services.audit.append(
         actor="admin", action="web.login", origin_tag=OriginTag.SYSTEM, payload=None

@@ -201,7 +201,7 @@ def isolated_db(tmp_path, monkeypatch):
     webhooks.set_client(NoNetworkClient())
 
 
-def test_app_config(tmp_path, **overrides):
+def build_app_config(tmp_path, **overrides):
     """An AppConfig for tests: temp database, no poller, no model."""
     settings = {
         "db_path": str(tmp_path / "test.db"),
@@ -217,7 +217,7 @@ def test_app_config(tmp_path, **overrides):
 
 @pytest.fixture
 def app_config(tmp_path):
-    return test_app_config(tmp_path)
+    return build_app_config(tmp_path)
 
 
 @pytest.fixture

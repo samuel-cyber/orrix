@@ -35,6 +35,10 @@ def create_app(
     the real sandbox clients themselves from the same config.
     """
     config = config or load_config()
+    # Refuse to serve an unsafe production configuration. Raised before any
+    # route exists, so a misconfigured deployment fails at boot rather than
+    # serving an approval button behind a weak password.
+    config.validate()
     services = Services(
         config,
         paypal_reader=paypal_reader,
@@ -50,6 +54,11 @@ def create_app(
         )
         store.init_db()
 
+        # Presence and settings only. No value from the environment is ever
+        # logged, so a startup log is safe to paste into an issue.
+        for line in config.startup_summary():
+            logger.info("config %s", line)
+
         if not config.admin_password:
             logger.warning(
                 "ADMIN_PASSWORD is not set; the UI will refuse every login until it is"
@@ -60,6 +69,11 @@ def create_app(
             logger.warning(
                 "AUDIT_HMAC_KEY is not set; the audit chain is tamper-evident only "
                 "against a tamperer who cannot recompute it (see docs/THREAT_MODEL.md)"
+            )
+        if not config.is_production:
+            logger.info(
+                "ORRIX_ENV is not production; cookies are not marked Secure. Set "
+                "ORRIX_ENV=production when serving over HTTPS."
             )
 
         task: asyncio.Task | None = None

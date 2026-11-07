@@ -21,7 +21,7 @@ from .conftest import (
     FakeWriter,
     load_fixture,
     recorded_snapshot,
-    test_app_config,
+    build_app_config,
 )
 
 SELLER_FORM = {
@@ -57,7 +57,7 @@ def writer():
 @pytest.fixture
 def web(tmp_path, snapshot, writer):
     """An app with a stored case, a fake reader and a fake writer."""
-    config = test_app_config(tmp_path)
+    config = build_app_config(tmp_path)
     store.save_case_snapshot(snapshot["dispute_id"], snapshot)
 
     reader = FakeReader([snapshot, recorded_snapshot(snapshot, tracking_number="123456789")])
@@ -184,7 +184,7 @@ def test_a_token_from_another_session_is_refused(web, tmp_path, snapshot):
     stolen = csrf_from(web)
 
     # A second client, a different session.
-    other = TestClient(create_app(config=test_app_config(tmp_path)), follow_redirects=False)
+    other = TestClient(create_app(config=build_app_config(tmp_path)), follow_redirects=False)
     other.post("/login", data={"password": ADMIN_PASSWORD})
 
     response = other.post("/audit/verify", data={"csrf_token": stolen})
@@ -221,7 +221,7 @@ def test_buyer_text_is_html_escaped(tmp_path, writer):
     store.save_case_snapshot(snapshot["dispute_id"], snapshot)
 
     application = create_app(
-        config=test_app_config(tmp_path),
+        config=build_app_config(tmp_path),
         paypal_reader=FakeReader([snapshot]),
         writer=writer,
     )
@@ -470,7 +470,7 @@ def test_approving_a_dispute_that_moved_underneath_is_refused(tmp_path, writer, 
     reader = FakeReader([moved])
 
     application = create_app(
-        config=test_app_config(tmp_path), paypal_reader=reader, writer=writer
+        config=build_app_config(tmp_path), paypal_reader=reader, writer=writer
     )
     with TestClient(application, follow_redirects=False) as client:
         sign_in(client)

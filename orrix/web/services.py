@@ -16,7 +16,7 @@ from ..executor import ExecutedApprovals, ExecutorDeps, build_writer
 from ..paypal import SandboxPayPalClient
 from ..pipeline import CaseViewStore, PipelineDeps
 from ..seller_input import SellerEvidenceInput, parse_seller_input
-from .security import SessionStore, hash_password, verify_password
+from .security import LoginThrottle, SessionStore, hash_password, verify_password
 
 logger = logging.getLogger("orrix.web.services")
 
@@ -33,13 +33,17 @@ class Services:
         case_store: Any | None = None,
     ):
         self.config = config
-        self.secure_cookies = config.secure_cookies
+        self.secure_cookies = config.use_secure_cookies
 
         self.audit = AuditLog(config.audit_config())
         self.case_views = CaseViewStore(config.db_path)
         self.executed = ExecutedApprovals(config.db_path)
         self.sessions = SessionStore(
             secret=config.session_secret, ttl_seconds=config.session_ttl_seconds
+        )
+        self.login_throttle = LoginThrottle(
+            max_failures=config.login_max_failures,
+            window_seconds=config.login_lockout_seconds,
         )
 
         # Hashed once at startup; the plain password is not kept.
