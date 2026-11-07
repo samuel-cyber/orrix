@@ -307,8 +307,22 @@ def test_api_cases_carries_no_buyer_text(web):
         "completeness",
         "flags",
         "orrix_status",
+        "orrix_status_label",
         "allowed_actions",
+        "detail",
     }
+    # The master/detail payload is codes and labels only.
+    detail = rows[0]["detail"]
+    assert set(detail) == {
+        "facts",
+        "discrepancy",
+        "completeness",
+        "evidence_submitted",
+        "reasons",
+        "case_url",
+    }
+    for fact in detail["facts"]:
+        assert set(fact) == {"name", "value", "status", "source", "origin_label"}
 
 
 def test_api_cases_reports_tracking_completeness(web):
@@ -503,9 +517,15 @@ def test_audit_page_and_api(web):
     sign_in(web)
 
     assert web.get("/audit", follow_redirects=True).status_code == 200
-    rows = web.get("/api/audit").json()
-    assert isinstance(rows, list)
-    assert all("origin_label" in row for row in rows)
+    payload = web.get("/api/audit").json()
+
+    assert payload["chain_ok"] is True
+    assert payload["first_bad_seq"] is None
+    assert isinstance(payload["rows"], list)
+    assert all("origin_label" in row for row in payload["rows"])
+    # Chain integrity is decided server-side, not in the browser.
+    assert all(row["chain_ok"] is True for row in payload["rows"])
+    assert all(row["chain_label"] == "ok" for row in payload["rows"])
 
 
 def test_verify_chain_reports_ok(web):

@@ -72,6 +72,15 @@ FLAG_DEADLINE_PASSED = "deadline_passed"
 FLAG_ALREADY_DONE = "already_done"
 FLAG_REFUNDS_NOT_IMPLEMENTED = "refunds_not_implemented"
 FLAG_DISCREPANCY = "discrepancy_detected"
+#: Orrix has already put evidence in front of PayPal and the dispute is now
+#: with the buyer. Nothing to do, and nothing wrong.
+FLAG_AWAITING_BUYER = "awaiting_buyer_response"
+
+REASON_AWAITING_BUYER = "evidence_submitted_awaiting_buyer"
+
+# States in which the dispute is with the other party rather than the seller.
+OTHER_PARTY_STATES = frozenset({"REQUIRED_OTHER_PARTY_ACTION"})
+OTHER_PARTY_STATUSES = frozenset({"WAITING_FOR_BUYER_RESPONSE"})
 
 
 def _utc_now() -> datetime:
@@ -160,6 +169,16 @@ def _needs_review(claim_input: Any) -> bool:
     return True
 
 
+def _is_awaiting_other_party(facts: Facts) -> bool:
+    """True when Orrix has responded and the ball is with the buyer."""
+    if facts.value("evidence_submitted") is not True:
+        return False
+    return (
+        facts.value("dispute_state") in OTHER_PARTY_STATES
+        or facts.value("status") in OTHER_PARTY_STATUSES
+    )
+
+
 def decide(
     facts: Facts,
     claim_form_or_needs_review: Any,
@@ -229,6 +248,18 @@ def decide(
         )
 
     # -- from here on, every required fact is confirmed -------------------
+
+    # Evidence is already in and the dispute has moved to the other party.
+    # There is no action to take and nothing incomplete about it, so this is
+    # reported as a settled state rather than as missing facts. A seller
+    # response deadline is irrelevant once the response has been made, so
+    # its absence is not blocking here.
+    if _is_awaiting_other_party(facts):
+        reasons.append(REASON_AWAITING_BUYER)
+        flags.add(FLAG_AWAITING_BUYER)
+        return PolicyDecision(
+            allowed_actions=frozenset(), reasons=tuple(reasons), flags=frozenset(flags)
+        )
 
     blocking: list[str] = []
 

@@ -49,6 +49,7 @@ FACT_NAMES: tuple[str, ...] = (
     "requested_evidence_types",
     "delivery_status",
     "delivered_on",
+    "evidence_submitted",
 )
 
 
@@ -316,6 +317,24 @@ def _resolve_tracking(
     builder.unavailable(name, entity_id, source)
 
 
+def _seller_has_submitted_evidence(evidences: Any) -> bool:
+    """True when the record already carries seller-submitted proof.
+
+    Read from the record, so it reflects what PayPal holds rather than what
+    Orrix believes it sent.
+    """
+    if not isinstance(evidences, list):
+        return False
+    for evidence in evidences:
+        if not isinstance(evidence, Mapping):
+            continue
+        if evidence.get("evidence_type") != "PROOF_OF_FULFILLMENT":
+            continue
+        if evidence.get("source") == "SUBMITTED_BY_SELLER":
+            return True
+    return False
+
+
 def _requested_evidence_types(evidences: Any) -> list[str]:
     if not isinstance(evidences, list):
         return []
@@ -498,6 +517,12 @@ def build_facts(
                 SOURCE_SELLER_INPUT,
                 FactStatus.SELLER_ASSERTED,
             )
+
+    builder.boolean(
+        "evidence_submitted",
+        _seller_has_submitted_evidence(dispute_snapshot.get("evidences")),
+        dispute_id,
+    )
 
     builder.codes(
         "requested_evidence_types",

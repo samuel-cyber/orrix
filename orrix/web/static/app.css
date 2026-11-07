@@ -312,3 +312,126 @@ input:focus, select:focus, button:focus {
 .login-card { width: 100%; max-width: 380px; }
 .login-card h1 { margin-bottom: 2px; }
 .login-card .btn { width: 100%; text-align: center; }
+
+/* -- toolbar and quick filter ---------------------------------------- */
+
+.toolbar { display: flex; align-items: center; gap: 8px; }
+
+.quick-filter {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  min-width: 260px;
+  background: var(--card);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.grid-tall { height: 640px; }
+
+/* -- deadline chips: colour by time left, text says the same --------- */
+
+.chip-deadline-ok { background: var(--line-soft); color: var(--ink-soft); border-color: var(--line); }
+.chip-deadline-soon { background: var(--warn-bg); color: var(--warn); border-color: #e9cf9b; }
+.chip-deadline-critical { background: #fdecd8; color: #8a3b00; border-color: #e9b584; }
+.chip-deadline-passed { background: var(--err-bg); color: var(--err); border-color: #eec0bd; }
+.chip-deadline-unknown { background: var(--line-soft); color: var(--ink-soft); border-style: dashed; }
+
+/* -- master/detail panel --------------------------------------------- */
+
+.detail-panel {
+  padding: 14px 16px;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.detail-header .btn { margin-top: 0; }
+
+.detail-line { font-size: 13px; }
+.detail-label {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.detail-banner { margin-bottom: 10px; }
+.detail-reasons { margin-bottom: 10px; }
+
+.detail-facts {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+}
+
+/* -- audit chain highlighting ---------------------------------------- */
+
+.row-chain-bad { background: var(--err-bg) !important; }
+.row-chain-bad .ag-cell { font-weight: 600; }
+.row-chain-suspect { background: #fdf6f5 !important; }
+
+/* -- evaluation ------------------------------------------------------- */
+
+.provenance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.provenance-item {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.provenance-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+
+.provenance-value { display: block; font-size: 22px; font-weight: 650; line-height: 1.2; }
+.value-good { color: var(--ok); }
+.value-bad { color: var(--err); }
+
+.caveats ul { margin: 6px 0 0; padding-left: 18px; }
+.caveats li { padding: 2px 0; }
+
+.chart { height: 320px; width: 100%; }
+
+/* The grid that owns the integrated chart is kept off-screen: AG Grid
+   charts are produced by a grid, but only the chart is meant to be seen. */
+.chart-source {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 640px;
+  height: 240px;
+}
+
+.empty-state pre { margin: 8px 0 12px; }

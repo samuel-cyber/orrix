@@ -25,11 +25,12 @@
   {% include "partials/verification.html" %}
 </div>
 
-<div id="audit-grid" class="ag-theme-quartz grid"></div>
+<div id="audit-grid" class="ag-theme-quartz grid grid-tall"></div>
 {% endblock %}
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/htmx.org@{{ htmx_version }}/dist/htmx.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/dist/ag-grid-community.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-enterprise@{{ ag_grid_version }}/dist/ag-grid-enterprise.min.js"></script>
+<script src="/static/grid-common.js"></script>
 <script src="/static/audit.js"></script>
 {% endblock %}

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Evaluation &middot; Orrix{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/styles/ag-grid.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@{{ ag_grid_version }}/styles/ag-theme-quartz.min.css">
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Evaluation</h1>
+    <p class="muted">Attack-harness results by system and attack category.</p>
+  </div>
+</div>
+
+{% if not results.available %}
+<section class="card empty-state">
+  <h2>No results yet</h2>
+  <p>{{ results.message }}</p>
+  <p>Generate them with:</p>
+  <pre class="payload">{{ results.generate_command }}</pre>
+  <p class="muted small">
+    The harness writes <span class="mono">{{ results.results_path }}</span>.
+    Record the caveats in <span class="mono">docs/RESULTS.md</span> alongside it;
+    this page shows them next to the numbers so they are read together.
+  </p>
+  {% if not results.notes_available %}
+  <p class="muted small">
+    <span class="mono">docs/RESULTS.md</span> does not exist yet either.
+  </p>
+  {% endif %}
+</section>
+{% else %}
+
+<section class="provenance">
+  <div class="provenance-item">
+    <span class="provenance-label">Model</span>
+    <span class="provenance-value mono">{{ results.model or "unrecorded" }}</span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">Date</span>
+    <span class="provenance-value mono">{{ results.date or "unrecorded" }}</span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">N (runs)</span>
+    <span class="provenance-value mono">{{ results.n }}</span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">Unauthorized actions</span>
+    <span class="provenance-value {% if results.total_unauthorized %}value-bad{% else %}value-good{% endif %}">
+      {{ results.total_unauthorized }}
+    </span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">Soft failures</span>
+    <span class="provenance-value">{{ results.total_soft_failures }}</span>
+  </div>
+</section>
+
+{% if results.caveats %}
+<section class="card caveats">
+  <h2>Caveats</h2>
+  <p class="section-note">From <span class="mono">docs/RESULTS.md</span>. Read these with the numbers.</p>
+  <ul>
+    {% for caveat in results.caveats %}
+    <li>{{ caveat }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="card alert-warn caveats">
+  <strong>No caveats recorded</strong>
+  <p class="small">
+    <span class="mono">docs/RESULTS.md</span> has no caveats or limitations
+    section. Numbers without stated limits invite over-reading.
+  </p>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Unauthorized actions per system</h2>
+  <p class="section-note">Lower is better. Zero is the only passing value.</p>
+  <div id="evaluation-chart" class="chart"></div>
+</section>
+
+<section class="card">
+  <h2>System &times; attack category</h2>
+  <p class="section-note">
+    Pivoted: a row per system, a column group per attack category, summing
+    unauthorized actions and soft failures.
+  </p>
+  <div id="evaluation-grid" class="ag-theme-quartz grid"></div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if results.available %}
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-enterprise@{{ ag_grid_version }}/dist/ag-grid-enterprise.min.js"></script>
+<script src="/static/grid-common.js"></script>
+<script src="/static/evaluation.js"></script>
+{% endif %}
+{% endblock %}

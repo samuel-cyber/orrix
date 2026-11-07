@@ -1,5 +1,8 @@
 {% if verification %}
-<div class="alert {% if verification.ok %}alert-ok{% else %}alert-error{% endif %}" role="status">
+<div class="alert {% if verification.ok %}alert-ok{% else %}alert-error{% endif %}"
+     role="status"
+     id="verification-result"
+     data-bad-seq="{{ verification.bad_seq if verification.bad_seq is not none else '' }}">
   {% if verification.ok %}
   <strong>Chain OK</strong>
   <p>
@@ -15,7 +18,8 @@
   {% endif %}
   {% else %}
   <strong>Chain broken</strong>
-  <p>First bad sequence: <span class="mono">{{ verification.bad_seq }}</span>.</p>
+  <p>First bad sequence: <span class="mono">{{ verification.bad_seq }}</span>.
+    The row is highlighted below; nothing after it can be vouched for.</p>
   {% endif %}
 </div>
 {% endif %}

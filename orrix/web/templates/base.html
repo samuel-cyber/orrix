@@ -7,7 +7,9 @@
   <link rel="stylesheet" href="/static/app.css">
   {% block head %}{% endblock %}
 </head>
-<body>
+<body
+  data-ag-grid-license="{{ ag_grid_license_key }}"
+  data-csrf-token="{{ csrf_token }}">
   <header class="topbar">
     <div class="topbar-left">
       <span class="wordmark">Orrix</span>
@@ -17,6 +19,7 @@
     <nav class="topnav">
       <a href="/cases" class="{% if request.url.path.startswith('/cases') %}current{% endif %}">Cases</a>
       <a href="/audit" class="{% if request.url.path.startswith('/audit') %}current{% endif %}">Audit</a>
+      <a href="/evaluation" class="{% if request.url.path.startswith('/evaluation') %}current{% endif %}">Evaluation</a>
       <form method="post" action="/logout" class="inline-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-quiet">Sign out</button>

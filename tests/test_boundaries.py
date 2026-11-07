@@ -8,6 +8,7 @@ The rule in CLAUDE.md is prose; this file is what makes it enforceable.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -471,6 +472,120 @@ def test_policy_and_reader_agree_on_did_not_run_reasons():
         "orrix/policy.py and orrix/reader.py disagree about which reader reasons "
         "mean 'did not run'. Keep the literals in step."
     )
+
+
+TEMPLATES_DIR = WEB_DIR / "templates"
+STATIC_DIR = WEB_DIR / "static"
+
+# Ways a string becomes markup or code. A renderer that uses any of these is
+# one buyer-authored character away from script execution.
+UNSAFE_SINKS = (
+    ".innerHTML",
+    ".outerHTML",
+    "insertAdjacentHTML",
+    "document.write",
+    "eval(",
+    "new Function(",
+    "setTimeout(\"",
+    "setInterval(\"",
+)
+
+
+def test_no_web_asset_writes_html_or_evaluates_code():
+    """Every value must reach the DOM through textContent."""
+    offenders: dict[str, list[str]] = {}
+
+    for path in sorted(list(STATIC_DIR.rglob("*.js")) + list(TEMPLATES_DIR.rglob("*.html"))):
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({sink for sink in UNSAFE_SINKS if sink in text})
+        if hits:
+            offenders[str(path.relative_to(WEB_DIR))] = hits
+
+    assert not offenders, (
+        f"web assets reach an HTML or code sink: {offenders}. Values must be set with "
+        f"textContent; nothing may be turned into markup or evaluated."
+    )
+
+
+def test_every_js_file_sets_values_with_text_content():
+    """A renderer that builds DOM should be using textContent to do it."""
+    for path in sorted(STATIC_DIR.rglob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        if "createElement" not in text:
+            continue
+        assert "textContent" in text, (
+            f"{path.name} builds DOM nodes but never uses textContent"
+        )
+
+
+def test_no_template_contains_an_inline_script_body():
+    """Scripts are external files; the CSP has no 'unsafe-inline'."""
+    import re
+
+    offenders: dict[str, list[str]] = {}
+
+    for path in sorted(TEMPLATES_DIR.rglob("*.html")):
+        text = path.read_text(encoding="utf-8")
+        bodies = [
+            body.strip()
+            for body in re.findall(r"<script\b[^>]*>(.*?)</script>", text, re.DOTALL)
+            if body.strip()
+        ]
+        if bodies:
+            offenders[path.name] = bodies
+
+    assert not offenders, (
+        f"templates carry inline script bodies: {list(offenders)}. The CSP forbids "
+        f"inline scripts; put the code in orrix/web/static/ instead."
+    )
+
+
+def test_no_template_carries_an_inline_style_attribute():
+    """style-src is strict too, so no style attributes in markup."""
+    offenders = [
+        path.name
+        for path in sorted(TEMPLATES_DIR.rglob("*.html"))
+        if 'style="' in path.read_text(encoding="utf-8")
+    ]
+
+    assert not offenders, f"templates carry style attributes: {offenders}"
+
+
+def test_local_storage_access_is_guarded():
+    """Storage can throw in private mode; column state is a convenience."""
+    for path in sorted(STATIC_DIR.rglob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        if "localStorage" not in text:
+            continue
+        assert "try {" in text, (
+            f"{path.name} touches localStorage without a try/catch"
+        )
+
+
+def test_the_web_layer_names_exactly_one_cdn_host():
+    """One pinned host, and it must match the CSP allowlist."""
+    from orrix.web.security import CDN_ORIGIN
+
+    hosts: set[str] = set()
+    for path in sorted(list(TEMPLATES_DIR.rglob("*.html")) + list(STATIC_DIR.rglob("*.js"))):
+        text = path.read_text(encoding="utf-8")
+        for match in re.findall(r"https://[a-zA-Z0-9.\-]+", text):
+            hosts.add(match)
+
+    assert hosts <= {CDN_ORIGIN}, (
+        f"web assets reference hosts outside the CSP allowlist: {sorted(hosts - {CDN_ORIGIN})}"
+    )
+
+
+def test_no_vendored_ag_grid_bundle_is_committed():
+    """AG Grid is loaded from the CDN, never checked in."""
+    offenders = [
+        str(path.relative_to(ORRIX_DIR.parent))
+        for path in ORRIX_DIR.parent.rglob("ag-grid*")
+        if path.is_file() and ".git" not in path.parts
+    ]
+
+    assert not offenders, f"an AG Grid bundle is committed: {offenders}"
 
 
 def test_seller_input_has_no_free_text_field():

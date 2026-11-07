@@ -24,13 +24,19 @@ _PBKDF2_ROUNDS = 200_000
 # in the UI is built from data.
 CDN_ORIGIN = "https://cdn.jsdelivr.net"
 
+# Exactly one remote host, and no 'unsafe-inline' anywhere. AG Grid sets
+# element styles through the CSSOM (element.style), which CSP does not
+# govern, so a strict style-src costs nothing. Templates carry no style
+# attributes and no inline script bodies; tests/test_boundaries.py enforces
+# that, and test_web.py pins this allowlist exactly.
+SCRIPT_SRC_ALLOWLIST = ("'self'", CDN_ORIGIN)
+STYLE_SRC_ALLOWLIST = ("'self'", CDN_ORIGIN)
+
 CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'self'",
-        f"script-src 'self' {CDN_ORIGIN}",
-        # AG Grid sets element styles at runtime, so inline styles are
-        # permitted. Inline *scripts* are not, which is the part that matters.
-        f"style-src 'self' {CDN_ORIGIN} 'unsafe-inline'",
+        "script-src " + " ".join(SCRIPT_SRC_ALLOWLIST),
+        "style-src " + " ".join(STYLE_SRC_ALLOWLIST),
         "img-src 'self' data:",
         f"font-src 'self' {CDN_ORIGIN} data:",
         "connect-src 'self'",

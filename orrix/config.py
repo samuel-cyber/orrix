@@ -63,6 +63,16 @@ class AppConfig:
     session_ttl_seconds: int = 8 * 3600
     secure_cookies: bool = False
 
+    # Optional AG Grid Enterprise licence. Injected into the page at render
+    # time so the grid runs without a watermark. Never logged, never
+    # committed; without it the grid still works.
+    ag_grid_license_key: str | None = field(default=None, repr=False)
+
+    # Where the evaluation harness writes its output, and where the caveats
+    # that must be read alongside it live.
+    results_path: str = "results/summary.json"
+    results_notes_path: str = "docs/RESULTS.md"
+
     reader_api_key: str | None = field(default=None, repr=False)
     reader_base_url: str = "https://api.openai.com/v1"
     reader_model: str = "gpt-4o-mini"
@@ -78,6 +88,10 @@ class AppConfig:
     port: int = DEFAULT_PORT
 
     # -- derived service configs -----------------------------------------
+
+    @property
+    def ag_grid_license_is_set(self) -> bool:
+        return bool(self.ag_grid_license_key)
 
     @property
     def reader_is_configured(self) -> bool:
@@ -127,6 +141,9 @@ def load_config() -> AppConfig:
         session_secret=session_secret,
         session_ttl_seconds=int(_number("SESSION_TTL_SECONDS", 8 * 3600)),
         secure_cookies=_flag("SECURE_COOKIES", False),
+        ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
+        results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
+        results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),
         reader_api_key=os.environ.get("READER_API_KEY"),
         reader_base_url=os.environ.get("READER_BASE_URL", "https://api.openai.com/v1"),
         reader_model=os.environ.get("READER_MODEL", "gpt-4o-mini"),

@@ -25,7 +25,7 @@ from .audit import AuditLog, OriginTag, hash_payload
 from .claim_form import ClaimForm
 from .discrepancy import Discrepancy, detect_discrepancy
 from .facts import Facts, FactsIntegrityError, build_facts
-from .policy import CaseState, PolicyConfig, PolicyDecision, decide
+from .policy import FLAG_AWAITING_BUYER, CaseState, PolicyConfig, PolicyDecision, decide
 from .reader import (
     REASON_NOT_CONFIGURED,
     STATUS_NEEDS_REVIEW,
@@ -43,6 +43,7 @@ ACTOR = "pipeline"
 STATUS_ACTION_AVAILABLE = "action_available"
 STATUS_NEEDS_HUMAN_REVIEW = "needs_human_review"
 STATUS_NO_ACTION = "no_action"
+STATUS_AWAITING_BUYER = "evidence_submitted_waiting_for_buyer"
 STATUS_FACTS_FAILED = "facts_failed"
 
 # Failures worth retrying on the next pass rather than caching.
@@ -197,9 +198,27 @@ def _dispute_amount(facts: Facts | None) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal("0")
 
 
+#: Human-readable label per status, for the UI.
+STATUS_LABELS = {
+    STATUS_ACTION_AVAILABLE: "Action available",
+    STATUS_NEEDS_HUMAN_REVIEW: "Needs human review",
+    STATUS_AWAITING_BUYER: "Evidence submitted, waiting for buyer",
+    STATUS_NO_ACTION: "No action",
+    STATUS_FACTS_FAILED: "Record could not be read",
+}
+
+
+def status_label(status: str) -> str:
+    return STATUS_LABELS.get(status, status)
+
+
 def _status_for(decision: PolicyDecision) -> str:
     if decision.allowed_actions:
         return STATUS_ACTION_AVAILABLE
+    # A dispute Orrix has already answered is settled, not incomplete. This
+    # is checked before the review flag so it is never mislabelled.
+    if FLAG_AWAITING_BUYER in decision.flags:
+        return STATUS_AWAITING_BUYER
     if decision.requires_review:
         return STATUS_NEEDS_HUMAN_REVIEW
     return STATUS_NO_ACTION

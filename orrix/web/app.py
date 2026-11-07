@@ -28,7 +28,8 @@ from ..approval import ApprovalError, DisputeVersion, create_approval
 from ..audit import OriginTag
 from ..executor import build_evidence_payload, execute
 from ..facts import FactStatus, build_facts
-from ..pipeline import process_case
+from ..evaluation import load_results
+from ..pipeline import process_case, status_label
 from ..policy import PROVIDE_EVIDENCE
 from ..reader import extract_buyer_text
 from ..seller_input import DeliveryStatus, SellerInputError, parse_seller_input
@@ -91,6 +92,10 @@ def _context(request: Request, **extra: Any) -> dict[str, Any]:
         "ag_grid_version": AG_GRID_VERSION,
         "htmx_version": HTMX_VERSION,
         "origin_labels": ORIGIN_LABELS,
+        # Injected into a data attribute at render time and read by the
+        # static grid scripts. Never inlined into a script body, never
+        # logged. Absent is fine: the grid runs with a watermark.
+        "ag_grid_license_key": services.config.ag_grid_license_key or "",
         **extra,
     }
 
@@ -297,12 +302,45 @@ def api_cases(request: Request) -> Response:
                 "completeness": _evidence_completeness(facts),
                 "flags": ", ".join(sorted(view.decision.flags)),
                 "orrix_status": view.status,
+                "orrix_status_label": status_label(view.status),
                 "allowed_actions": ", ".join(sorted(view.decision.allowed_actions)),
+                # Master/detail payload. Facts are codes; the discrepancy is
+                # the module's fixed sentence. No buyer text anywhere.
+                "detail": {
+                    "facts": _detail_rows(facts),
+                    "discrepancy": view.discrepancy.message if view.discrepancy else "",
+                    "completeness": _evidence_completeness(facts),
+                    "evidence_submitted": bool(
+                        facts.value("evidence_submitted")
+                    )
+                    if facts
+                    else False,
+                    "reasons": list(view.decision.reasons),
+                    "case_url": f"/cases/{dispute_id}",
+                },
             }
         )
 
     rows.sort(key=lambda row: (row["hours_left"] is None, row["hours_left"]))
     return JSONResponse(rows)
+
+
+def _detail_rows(facts) -> list[dict[str, str]]:
+    """Facts for the master/detail panel. Codes and labels only."""
+    if facts is None:
+        return []
+    rows = [
+        {
+            "name": name,
+            "value": "" if fact.value is None else str(fact.value),
+            "status": fact.status.value,
+            "source": fact.source,
+            "origin_label": ORIGIN_LABELS.get(fact.source, fact.source),
+        }
+        for name, fact in facts.facts.items()
+    ]
+    rows.sort(key=lambda row: row["name"])
+    return rows
 
 
 # -- one case -----------------------------------------------------------
@@ -515,9 +553,22 @@ def audit_page(request: Request) -> Response:
 
 @router.get("/api/audit")
 def api_audit(request: Request) -> Response:
+    """Audit rows with chain integrity decided server-side.
+
+    The browser is told whether each row verifies; it never recomputes a
+    hash itself, so the grid cannot disagree with the server about what is
+    intact.
+    """
     services = _services(request)
-    return JSONResponse(
-        [
+    entries = services.audit.entries()
+    bad_seq = services.audit.verify_chain()
+
+    rows = []
+    for entry in entries:
+        # Everything from the first bad sequence onward is suspect: the
+        # chain cannot vouch for anything after the break.
+        chain_ok = bad_seq is None or entry.seq < bad_seq
+        rows.append(
             {
                 "seq": entry.seq,
                 "ts": entry.ts,
@@ -528,10 +579,45 @@ def api_audit(request: Request) -> Response:
                 "origin_label": ORIGIN_LABELS.get(entry.origin_tag, entry.origin_tag),
                 "payload_hash": entry.payload_hash[:16],
                 "entry_hash": entry.entry_hash[:16],
+                "chain_ok": chain_ok,
+                "chain_label": "ok" if chain_ok else "broken",
+                "is_first_bad": bad_seq is not None and entry.seq == bad_seq,
             }
-            for entry in services.audit.entries()
-        ]
+        )
+
+    return JSONResponse(
+        {
+            "rows": rows,
+            "chain_ok": bad_seq is None,
+            "first_bad_seq": bad_seq,
+            "keyed": bool(services.audit.config.hmac_key),
+            "entries": len(entries),
+        }
     )
+
+
+# -- evaluation ---------------------------------------------------------
+
+
+@router.get("/evaluation", response_class=HTMLResponse)
+def evaluation_page(request: Request) -> Response:
+    services = _services(request)
+    results = load_results(
+        services.config.results_path, services.config.results_notes_path
+    )
+    return templates.TemplateResponse(
+        request, "evaluation.html", _context(request, results=results)
+    )
+
+
+@router.get("/api/evaluation")
+def api_evaluation(request: Request) -> Response:
+    """Harness output. Counts and labels only; no dispute data at all."""
+    services = _services(request)
+    results = load_results(
+        services.config.results_path, services.config.results_notes_path
+    )
+    return JSONResponse(results.as_dict())
 
 
 @router.post("/audit/verify", response_class=HTMLResponse)
@@ -543,6 +629,8 @@ def verify_audit(request: Request, csrf_token: str = Form("")) -> Response:
     bad_seq = services.audit.verify_chain()
     verification = {
         "ok": bad_seq is None,
+        # Read by audit.js from a data attribute to highlight the row. A
+        # data attribute is not a script, so the CSP stays strict.
         "bad_seq": bad_seq,
         "keyed": bool(services.audit.config.hmac_key),
         "entries": len(services.audit.entries()),
