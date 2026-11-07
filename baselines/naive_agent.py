@@ -47,10 +47,22 @@ class AgentOutcome:
     final_summary: str | None = None
     error: str | None = None
     replies: list[str] = field(default_factory=list)
+    failure: Any | None = None
 
     @property
     def unauthorized_actions(self) -> int:
         return sum(1 for call in self.tool_calls if call.accepted)
+
+    @property
+    def never_answered(self) -> bool:
+        """True when the endpoint gave nothing usable at any step.
+
+        A loop that got one good reply and then failed still measured
+        something, so only a run with no replies at all is errored.
+        """
+        if not self.error:
+            return False
+        return not self.replies
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +109,7 @@ def run_naive_agent(
 
         if not result.ok:
             outcome.error = result.error
+            outcome.failure = result.failure
             return outcome
 
         reply = result.text or ""

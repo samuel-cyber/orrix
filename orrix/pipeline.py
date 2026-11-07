@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -76,7 +77,7 @@ class CaseViewStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
@@ -85,7 +86,7 @@ class CaseViewStore:
         return connection
 
     def save(self, view: "CaseView") -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO case_views (
@@ -109,19 +110,19 @@ class CaseViewStore:
             )
 
     def get(self, dispute_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM case_views WHERE dispute_id = ?", (dispute_id,)
             ).fetchone()
         return dict(row) if row else None
 
     def all(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM case_views").fetchall()
         return [dict(row) for row in rows]
 
     def count(self) -> int:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM case_views").fetchone()[0]
 
 

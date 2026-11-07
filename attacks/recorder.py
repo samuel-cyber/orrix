@@ -12,9 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from attacks.status import classify, is_ok, needs_reclassification
+
 logger = logging.getLogger("attacks.recorder")
 
 DEFAULT_RECORDED_DIR = Path(__file__).parent / "recorded"
+
+
+def _with_classification(record: dict[str, Any]) -> dict[str, Any]:
+    status, reason = classify(record)
+    updated = dict(record)
+    updated["status"] = status
+    updated["error_reason"] = reason
+    updated["reclassified"] = True
+    return updated
 
 
 @dataclass(frozen=True)
@@ -43,15 +54,75 @@ class Recorder:
     # -- reading ---------------------------------------------------------
 
     def runs_recorded(self, label: str, system: str, attack_id: str) -> int:
-        """How many runs already exist, so a resumed run can skip them."""
-        path = self.path_for(label, system, attack_id)
-        if not path.is_file():
-            return 0
-        try:
-            with path.open(encoding="utf-8") as handle:
-                return sum(1 for line in handle if line.strip())
-        except OSError:
-            return 0
+        """How many runs already exist, errored ones included."""
+        return len(self.read_file(self.path_for(label, system, attack_id)))
+
+    def ok_run_indices(self, label: str, system: str, attack_id: str) -> set[int]:
+        """Run indices that produced a usable result.
+
+        Resume skips only these. An errored run is not a result, so leaving
+        it in place would permanently bake an endpoint outage into the
+        numbers.
+        """
+        return {
+            int(record.get("run_index", 0) or 0)
+            for record in self.read_file(self.path_for(label, system, attack_id))
+            if is_ok(record)
+        }
+
+    def errored_run_indices(self, label: str, system: str, attack_id: str) -> set[int]:
+        return {
+            int(record.get("run_index", 0) or 0)
+            for record in self.read_file(self.path_for(label, system, attack_id))
+            if not is_ok(record)
+        }
+
+    def raw_records_for_label(self, label: str) -> list[dict[str, Any]]:
+        """Records exactly as stored, with no status stamped on."""
+        directory = self.label_dir(label)
+        if not directory.is_dir():
+            return []
+        records: list[dict[str, Any]] = []
+        for path in sorted(directory.rglob("*.jsonl")):
+            records.extend(self.read_file(path))
+        return records
+
+    def reclassified_count(self, label: str) -> int:
+        """Records written before `status` existed, classified by evidence.
+
+        Counted from the stored bytes, not from the classified view, so the
+        number reported to the operator is the number actually inferred.
+        """
+        return sum(
+            1 for record in self.raw_records_for_label(label) if needs_reclassification(record)
+        )
+
+    def purge_errored(self, label: str) -> tuple[int, int]:
+        """Delete errored records for a label.
+
+        Returns (removed, kept). Files left with no records are deleted so a
+        later run does not see an empty file and think work was done.
+        """
+        directory = self.label_dir(label)
+        if not directory.is_dir():
+            return 0, 0
+
+        removed = 0
+        kept = 0
+        for path in sorted(directory.rglob("*.jsonl")):
+            records = self.read_file(path)
+            survivors = [record for record in records if is_ok(record)]
+            removed += len(records) - len(survivors)
+            kept += len(survivors)
+
+            if not survivors:
+                path.unlink()
+                continue
+            with path.open("w", encoding="utf-8") as handle:
+                for record in survivors:
+                    handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+
+        return removed, kept
 
     def read_file(self, path: Path) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
@@ -97,7 +168,13 @@ class Recorder:
                 int(record.get("run_index", 0) or 0),
             )
         )
-        return records
+
+        # Legacy records carry no status; classify them from the evidence
+        # they do carry so every consumer sees one shape.
+        return [
+            record if not needs_reclassification(record) else _with_classification(record)
+            for record in records
+        ]
 
     def all_records(self) -> dict[str, list[dict[str, Any]]]:
         return {label: self.records_for_label(label) for label in self.labels()}

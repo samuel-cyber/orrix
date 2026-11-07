@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -63,7 +64,7 @@ class ExecutedApprovals:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
@@ -73,7 +74,7 @@ class ExecutedApprovals:
 
     def claim(self, approval_id: str, dispute_id: str, action: str) -> bool:
         """Atomically claim an approval. False means it was already claimed."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO executed_approvals
@@ -85,14 +86,14 @@ class ExecutedApprovals:
             return cursor.rowcount == 1
 
     def was_executed(self, approval_id: str) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT 1 FROM executed_approvals WHERE approval_id = ?", (approval_id,)
             ).fetchone()
             return row is not None
 
     def count(self) -> int:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM executed_approvals").fetchone()[0]
 
 

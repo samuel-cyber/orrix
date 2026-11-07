@@ -21,11 +21,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from attacks.chat import BudgetExhausted, CallBudget, ChatClient, ChatConfig
+from attacks.chat import (
+    EVAL_TIMEOUT_SECONDS,
+    BudgetExhausted,
+    CallBudget,
+    ChatClient,
+    ChatConfig,
+)
 from attacks.corpus import Attack, load_corpus
 from attacks.metrics import build_label_report
 from attacks.recorder import DEFAULT_RECORDED_DIR, Recorder
 from attacks.report import build_report, write_results_md, write_summary
+from attacks.status import STATUS_ERRORED
 from attacks.systems import (
     SYSTEM_DEFENDED,
     SYSTEM_NAIVE,
@@ -50,6 +57,11 @@ CALLS_PER_RUN = {SYSTEM_ORRIX: 1, SYSTEM_NAIVE: 3, SYSTEM_DEFENDED: 3}
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BUDGET = 3
+EXIT_UNHEALTHY = 4
+
+#: Stop a run after this many errored runs in a row. A dead endpoint should
+#: cost minutes, not the three hours the first run took.
+CONSECUTIVE_ERROR_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -59,7 +71,11 @@ class ModelSettings:
     base_url: str
     api_key: str
     model: str
-    timeout: float = 60.0
+    #: A hard per-request ceiling for evaluation calls. Short on purpose: the
+    #: first live run spent about three hours on silent connect timeouts.
+    #: This is the harness's own setting and does not change the production
+    #: Reader, whose default stays at 30s.
+    timeout: float = EVAL_TIMEOUT_SECONDS
     max_retries: int = 3
 
     def chat_config(self) -> ChatConfig:
@@ -112,11 +128,23 @@ def model_settings_from(values: dict[str, str]) -> ModelSettings:
         except (TypeError, ValueError):
             return default
 
+    # The 20s ceiling is hard: an env file asking for 60 is capped, because
+    # a long timeout is exactly what turned a dead endpoint into a
+    # three-hour run. A shorter value from the env file is honoured.
+    requested_timeout = number("READER_TIMEOUT", EVAL_TIMEOUT_SECONDS)
+    timeout = min(requested_timeout, EVAL_TIMEOUT_SECONDS)
+    if requested_timeout > EVAL_TIMEOUT_SECONDS:
+        logger.info(
+            "capping per-request timeout at %ss for the harness (env file asked for %ss)",
+            EVAL_TIMEOUT_SECONDS,
+            requested_timeout,
+        )
+
     return ModelSettings(
         base_url=values["READER_BASE_URL"],
         api_key=values["READER_API_KEY"],
         model=values["READER_MODEL"],
-        timeout=number("READER_TIMEOUT", 60.0),
+        timeout=timeout,
         max_retries=int(number("READER_MAX_RETRIES", 3)),
     )
 
@@ -126,10 +154,12 @@ def model_settings_from(values: dict[str, str]) -> ModelSettings:
 
 @dataclass(frozen=True)
 class PlannedWork:
-    """What is left to do, after skipping what is already recorded."""
+    """What is left to do, after skipping runs that already succeeded."""
 
     items: tuple[tuple[str, Attack, int], ...]
     skipped: int
+    #: How many of the planned items are reruns of errored records.
+    retrying: int = 0
 
     @property
     def estimated_calls(self) -> int:
@@ -145,24 +175,49 @@ def plan_work(
     n: int,
     recorder: Recorder,
     label: str,
+    retry_errors: bool = True,
 ) -> PlannedWork:
-    """Everything not already recorded for this label, in a stable order."""
+    """Everything still to do for this label, in a stable order.
+
+    Only runs with status "ok" are skipped. An errored run is not a result,
+    so by default it is planned again; pass retry_errors=False to leave
+    errored slots alone.
+    """
     items: list[tuple[str, Attack, int]] = []
     skipped = 0
+    retrying = 0
 
     for system in systems:
         for attack in attacks:
-            done = recorder.runs_recorded(label, system, attack.id)
+            done_ok = recorder.ok_run_indices(label, system, attack.id)
+            errored = recorder.errored_run_indices(label, system, attack.id)
             for run_index in range(n):
-                if run_index < done:
+                if run_index in done_ok:
                     skipped += 1
                     continue
+                if run_index in errored:
+                    if not retry_errors:
+                        skipped += 1
+                        continue
+                    retrying += 1
                 items.append((system, attack, run_index))
 
-    return PlannedWork(items=tuple(items), skipped=skipped)
+    return PlannedWork(items=tuple(items), skipped=skipped, retrying=retrying)
 
 
 # -- live ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LiveOutcome:
+    """What a live run actually did, including why it stopped."""
+
+    recorded: int
+    planned: int
+    aborted: bool = False
+    consecutive_errors: int = 0
+    last_failure: dict[str, Any] | None = None
+    calls_used: int = 0
 
 
 def run_live(
@@ -174,18 +229,27 @@ def run_live(
     recorder: Recorder,
     max_calls: int | None,
     session: Any | None = None,
-) -> tuple[int, int]:
-    """Record runs until the work or the budget runs out.
+    retry_errors: bool = True,
+) -> LiveOutcome:
+    """Record runs until the work, the budget, or the endpoint runs out.
 
-    Returns (recorded, attempted). Sequential by design: these are someone's
-    paid credits, and a burst of parallel calls is how a rate limit and a
-    wasted budget happen at the same time.
+    Sequential by design: these are someone's paid credits, and a burst of
+    parallel calls is how a rate limit and a wasted budget happen at the
+    same time. Aborts after CONSECUTIVE_ERROR_LIMIT errored runs in a row,
+    keeping everything recorded so far.
     """
-    work = plan_work(attacks, systems, n, recorder, label)
+    work = plan_work(attacks, systems, n, recorder, label, retry_errors=retry_errors)
     budget = CallBudget(max_calls=max_calls)
     recorded = 0
+    consecutive_errors = 0
+    last_failure: dict[str, Any] | None = None
+    aborted = False
 
-    with tempfile.TemporaryDirectory(prefix="orrix-eval-") as tmp:
+    # ignore_cleanup_errors: a leftover scratch file must never fail a run
+    # whose records are already safely on disk.
+    with tempfile.TemporaryDirectory(
+        prefix="orrix-eval-", ignore_cleanup_errors=True
+    ) as tmp:
         tmp_dir = Path(tmp)
 
         for system, attack, run_index in work.items:
@@ -218,16 +282,49 @@ def run_live(
 
             recorder.append(record.as_dict())
             recorded += 1
-            logger.info(
-                "recorded system=%s attack=%s run=%s unauthorized=%s calls_used=%s",
-                system,
-                attack.id,
-                run_index,
-                record.unauthorized_actions,
-                budget.used,
-            )
 
-    return recorded, len(work)
+            if record.status == STATUS_ERRORED:
+                consecutive_errors += 1
+                last_failure = record.failure or {
+                    "exception_class": "unknown",
+                    "message": record.error_reason or "no usable response",
+                }
+                logger.warning(
+                    "errored run %s/%s in a row system=%s attack=%s run=%s reason=%s "
+                    "elapsed=%.2fs calls_used=%s",
+                    consecutive_errors,
+                    CONSECUTIVE_ERROR_LIMIT,
+                    system,
+                    attack.id,
+                    run_index,
+                    record.error_reason,
+                    record.elapsed_seconds,
+                    budget.used,
+                )
+                if consecutive_errors >= CONSECUTIVE_ERROR_LIMIT:
+                    aborted = True
+                    break
+            else:
+                consecutive_errors = 0
+                logger.info(
+                    "recorded system=%s attack=%s run=%s unauthorized=%s "
+                    "elapsed=%.2fs calls_used=%s",
+                    system,
+                    attack.id,
+                    run_index,
+                    record.unauthorized_actions,
+                    record.elapsed_seconds,
+                    budget.used,
+                )
+
+    return LiveOutcome(
+        recorded=recorded,
+        planned=len(work),
+        aborted=aborted,
+        consecutive_errors=consecutive_errors,
+        last_failure=last_failure,
+        calls_used=budget.used,
+    )
 
 
 class _ReaderSession:
@@ -278,6 +375,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", help="file holding READER_BASE_URL/API_KEY/MODEL")
     parser.add_argument("--max-calls", type=int, help="hard ceiling on model calls")
     parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="rerun records whose model call errored (default for --live)",
+    )
+    parser.add_argument(
+        "--no-retry-errors",
+        action="store_true",
+        help="leave errored records alone instead of rerunning them",
+    )
+    parser.add_argument(
+        "--purge-errors",
+        action="store_true",
+        help="delete errored records for --label and report how many went",
+    )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="print the plan and exit without calling a model",
+    )
+    parser.add_argument(
         "--systems", default=",".join(SYSTEMS), help="comma-separated systems to run"
     )
     parser.add_argument("--corpus", help="path to corpus.yaml")
@@ -304,6 +421,25 @@ def main(argv: Sequence[str] | None = None, session: Any | None = None) -> int:
         print(f"unknown system(s): {', '.join(unknown)}", file=sys.stderr)
         return EXIT_USAGE
 
+    if args.purge_errors:
+        if not args.label:
+            print("--purge-errors needs --label", file=sys.stderr)
+            return EXIT_USAGE
+
+        reclassified = recorder.reclassified_count(args.label)
+        before = len(recorder.raw_records_for_label(args.label))
+        removed, kept = recorder.purge_errored(args.label)
+
+        print(f"label:                 {args.label}")
+        print(f"records before:        {before}")
+        if reclassified:
+            print(
+                f"reclassified:          {reclassified} record(s) had no status field "
+                f"and were classified from their recorded model_error"
+            )
+        print(f"errored removed:       {removed}")
+        print(f"valid records kept:    {kept}")
+
     if args.live:
         if not args.label:
             print("--live needs --label to name the provider and model", file=sys.stderr)
@@ -319,21 +455,34 @@ def main(argv: Sequence[str] | None = None, session: Any | None = None) -> int:
             print(str(error), file=sys.stderr)
             return EXIT_USAGE
 
-        work = plan_work(attacks, requested, args.n, recorder, args.label)
+        retry_errors = not args.no_retry_errors
+        reclassified = recorder.reclassified_count(args.label)
+        work = plan_work(
+            attacks, requested, args.n, recorder, args.label, retry_errors=retry_errors
+        )
 
         print(f"label:            {args.label}")
         print(f"model:            {settings.model}")
         print(f"attacks:          {len(attacks)}")
         print(f"systems:          {', '.join(requested)}")
         print(f"runs per combo:   {args.n}")
-        print(f"already recorded: {work.skipped} (skipped)")
+        print(f"already ok:       {work.skipped} (skipped)")
+        print(f"errored to rerun: {work.retrying}")
         print(f"runs to do:       {len(work)}")
         print(f"planned calls:    ~{work.estimated_calls}")
+        print(f"per-call timeout: {settings.timeout}s")
+        if reclassified:
+            print(
+                f"reclassified:     {reclassified} legacy record(s) classified from "
+                f"their recorded model_error"
+            )
         if args.max_calls is not None:
             print(f"call ceiling:     {args.max_calls}")
 
-        if not len(work):
-            print("nothing to do; everything is already recorded for this label")
+        if args.plan_only:
+            print("\nplan only; no model was called")
+        elif not len(work):
+            print("nothing to do; every run for this label already succeeded")
         elif not args.yes:
             print(
                 "\nrefusing to spend credits without --yes. Re-run with --yes to proceed.",
@@ -341,7 +490,7 @@ def main(argv: Sequence[str] | None = None, session: Any | None = None) -> int:
             )
             return EXIT_USAGE
         else:
-            recorded, attempted = run_live(
+            outcome = run_live(
                 attacks,
                 requested,
                 args.n,
@@ -350,28 +499,62 @@ def main(argv: Sequence[str] | None = None, session: Any | None = None) -> int:
                 recorder,
                 args.max_calls,
                 session=session,
+                retry_errors=retry_errors,
             )
-            print(f"\nrecorded {recorded} of {attempted} planned runs")
-            if recorded < attempted:
+            print(f"\nrecorded {outcome.recorded} of {outcome.planned} planned runs")
+            print(f"model calls used: {outcome.calls_used}")
+
+            if outcome.aborted:
+                failure = outcome.last_failure or {}
+                print(
+                    f"\nlast error: {failure.get('exception_class', 'unknown')}: "
+                    f"{failure.get('message', '')}"
+                )
+                print(
+                    "endpoint unhealthy, recorded runs are kept, rerun later"
+                )
+                _write_report(recorder, summary_path, results_md_path)
+                return EXIT_UNHEALTHY
+
+            if outcome.recorded < outcome.planned:
                 print("stopped early: call budget reached. Re-run to resume.")
 
     # Both modes report from what is on disk, so the output always matches
     # the recorded evidence rather than this process's memory.
-    reports = run_replay(recorder)
-    report = build_report(reports)
+    _write_report(recorder, summary_path, results_md_path)
+    return EXIT_OK
+
+
+def _write_report(recorder: Recorder, summary_path: Path, results_md_path: Path) -> None:
+    """Rebuild both reports from disk and print the headline figures."""
+    report = build_report(run_replay(recorder))
     write_summary(report, summary_path)
     write_results_md(report, results_md_path)
 
+    warning = report.warning_line()
+    if warning:
+        print(f"\n{warning}")
+
     print(f"\nlabels reported:  {len(report.labels)}")
     for label in report.labels:
+        blanked = label.systems_without_valid_runs()
         print(
-            f"  {label.label}: {label.record_count} runs, "
+            f"  {label.label}: {label.total_valid_runs} valid run(s), "
+            f"{label.total_errored_runs} errored, "
             f"{label.total_unauthorized} unauthorized, "
             f"{label.total_soft_failures} soft failures"
         )
+        for system in sorted(set(label.runs_by_system()) | set(label.errored_by_system())):
+            print(
+                f"    {system}: valid={label.runs_by_system().get(system, 0)} "
+                f"errored={label.errored_by_system().get(system, 0)} "
+                f"unauthorized={label.unauthorized_display(system)}"
+            )
+        if blanked:
+            print(f"    no valid runs for: {', '.join(blanked)}")
+
     print(f"combined unauthorized actions: {report.combined_unauthorized}")
     print(f"wrote {summary_path} and {results_md_path}")
-    return EXIT_OK
 
 
 if __name__ == "__main__":

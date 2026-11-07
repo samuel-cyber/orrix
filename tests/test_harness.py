@@ -475,7 +475,7 @@ def test_resume_skips_already_recorded_runs(tmp_path, capsys):
     )
 
     out = capsys.readouterr().out
-    assert f"already recorded: {len(attacks)} (skipped)" in out
+    assert f"already ok:       {len(attacks)} (skipped)" in out
     assert "runs to do:       0" in out
     assert "nothing to do" in out
 

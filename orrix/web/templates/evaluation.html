@@ -33,6 +33,18 @@
 </section>
 {% else %}
 
+{% if results.warning %}
+<div class="alert alert-warn" role="alert">
+  <strong>{{ results.warning }}</strong>
+  <p class="small">
+    An errored run is one where the model never returned a usable response,
+    so it measures the endpoint rather than the system under test. Rerun with
+    <span class="mono">--retry-errors</span>, or clear them with
+    <span class="mono">--purge-errors --label &lt;label&gt;</span>.
+  </p>
+</div>
+{% endif %}
+
 {% if results.labels %}
 <section class="card">
   <h2>Labels</h2>
@@ -44,7 +56,7 @@
     <thead>
       <tr>
         <th>Label</th><th>Model</th><th>Date</th><th>N</th>
-        <th>Runs</th><th>Unauthorized</th><th>Soft failures</th>
+        <th>Valid runs</th><th>Errored</th><th>Unauthorized</th><th>Soft failures</th>
       </tr>
     </thead>
     <tbody>
@@ -54,14 +66,61 @@
         <td class="mono">{{ label.model }}</td>
         <td class="mono">{{ label.date }}</td>
         <td class="mono">{{ label.n }}</td>
-        <td class="mono">{{ label.record_count }}</td>
+        <td class="mono">{{ label.total_valid_runs }}</td>
+        <td class="mono">
+          {% if label.total_errored_runs %}
+          <span class="chip chip-flag">{{ label.total_errored_runs }}</span>
+          {% else %}0{% endif %}
+        </td>
         <td>
+          {% if label.total_valid_runs %}
           <span class="chip {% if label.total_unauthorized %}chip-conflicting{% else %}chip-confirmed{% endif %}">
             {{ label.total_unauthorized }}
           </span>
+          {% else %}
+          <span class="chip chip-unavailable">no valid runs</span>
+          {% endif %}
         </td>
         <td class="mono">{{ label.total_soft_failures }}</td>
       </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>By system</h2>
+  <p class="section-note">
+    Unauthorized actions are counted among valid runs only. A system with no
+    valid runs shows an absence of data, never a zero.
+  </p>
+  <table class="facts">
+    <thead>
+      <tr><th>Label</th><th>System</th><th>Valid runs</th><th>Errored</th><th>Unauthorized</th></tr>
+    </thead>
+    <tbody>
+      {% for label in results.labels %}
+      {% for row in label.per_system() %}
+      <tr>
+        <td class="mono">{{ label.label }}</td>
+        <td class="mono">{{ row.system }}</td>
+        <td class="mono">{{ row.valid_runs }}</td>
+        <td class="mono">
+          {% if row.errored_runs %}
+          <span class="chip chip-flag">{{ row.errored_runs }}</span>
+          {% else %}0{% endif %}
+        </td>
+        <td>
+          {% if row.has_valid_runs %}
+          <span class="chip {% if row.unauthorized_actions %}chip-conflicting{% else %}chip-confirmed{% endif %}">
+            {{ row.unauthorized_actions }}
+          </span>
+          {% else %}
+          <span class="chip chip-unavailable">no valid runs</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
       {% endfor %}
     </tbody>
   </table>
@@ -80,6 +139,18 @@
   <div class="provenance-item">
     <span class="provenance-label">N (runs)</span>
     <span class="provenance-value mono">{{ results.n }}</span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">Valid runs</span>
+    <span class="provenance-value mono">{{ results.combined_valid_runs }}</span>
+    <span class="muted small">errored runs are excluded</span>
+  </div>
+  <div class="provenance-item">
+    <span class="provenance-label">Errored runs</span>
+    <span class="provenance-value {% if results.combined_errored_runs %}value-bad{% endif %}">
+      {{ results.combined_errored_runs }}
+    </span>
+    <span class="muted small">counted in nothing</span>
   </div>
   <div class="provenance-item">
     <span class="provenance-label">Unauthorized actions</span>

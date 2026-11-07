@@ -13,7 +13,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from orrix.errors import FailureDetail, describe, host_of, retry_after_seconds
+
 logger = logging.getLogger("attacks.chat")
+
+#: A hard ceiling for evaluation calls. Deliberately short: a three-hour run
+#: of silent connect timeouts is worse than a fast, visible failure. This is
+#: the harness's own default and does not change the production Reader.
+EVAL_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -23,10 +30,22 @@ class ChatConfig:
     base_url: str
     api_key: str = field(repr=False)
     model: str
-    timeout: float = 60.0
+    timeout: float = EVAL_TIMEOUT_SECONDS
     max_retries: int = 3
-    backoff_seconds: float = 2.0
+    backoff_seconds: float = 1.0
+    #: Delay before each retry, in order; three attempts in total.
+    retry_backoff_schedule: tuple[float, ...] = (1.0, 3.0)
     temperature: float = 0.0
+
+    @property
+    def max_attempts(self) -> int:
+        return len(self.retry_backoff_schedule) + 1
+
+    def backoff_for(self, retry_number: int) -> float:
+        if retry_number < 1 or not self.retry_backoff_schedule:
+            return 0.0
+        index = min(retry_number, len(self.retry_backoff_schedule)) - 1
+        return self.retry_backoff_schedule[index] * self.backoff_seconds
 
     @property
     def completions_url(self) -> str:
@@ -60,16 +79,31 @@ class CallBudget:
         self.used += 1
 
 
+#: Errors that mean the endpoint never gave a usable answer.
+NO_RESPONSE_ERRORS = ("transport_error", "rate_limited", "unreadable_response",
+                      "empty_response", "retries_exhausted")
+
+
 @dataclass(frozen=True)
 class ChatResult:
     text: str | None
     status_code: int | None
     attempts: int
     error: str | None = None
+    #: Scrubbed detail of the last transport failure, when there was one.
+    failure: FailureDetail | None = None
 
     @property
     def ok(self) -> bool:
         return self.text is not None and self.error is None
+
+    @property
+    def model_never_answered(self) -> bool:
+        """True when nothing usable came back, including any HTTP error."""
+        if self.ok:
+            return False
+        reason = self.error or ""
+        return reason.startswith("http_") or reason.startswith(NO_RESPONSE_ERRORS)
 
 
 class ChatClient:
@@ -111,12 +145,18 @@ class ChatClient:
         }
 
         attempts = 0
+        transport_retries = 0
         rate_limited = 0
-        ceiling = self.config.max_retries + 2
+        server_errors = 0
+        ceiling = self.config.max_attempts
+        host = host_of(self.config.completions_url)
+        last_failure: FailureDetail | None = None
 
         while attempts < ceiling:
+            # Every attempt costs a call, including a retry.
             self.budget.consume()
             attempts += 1
+            started = time.monotonic()
             try:
                 response = self._client().post(
                     self.config.completions_url,
@@ -125,26 +165,76 @@ class ChatClient:
                     timeout=self.config.timeout,
                 )
             except Exception as error:
-                logger.warning("chat transport_error attempt=%s", attempts)
+                elapsed = time.monotonic() - started
+                last_failure = describe(
+                    error, self.config.completions_url, attempts, elapsed
+                )
+                logger.warning(
+                    "chat status=transport_error " + last_failure.log_fields()
+                )
+                transport_retries += 1
+                if transport_retries < ceiling:
+                    delay = self.config.backoff_for(transport_retries)
+                    logger.info("chat backoff=%ss before attempt=%s", delay, attempts + 1)
+                    self._sleep(delay)
+                    continue
                 return ChatResult(
-                    text=None, status_code=None, attempts=attempts,
-                    error=f"transport_error:{type(error).__name__}",
+                    text=None,
+                    status_code=None,
+                    attempts=attempts,
+                    error=f"transport_error:{last_failure.exception_class}",
+                    failure=last_failure,
                 )
 
+            elapsed = time.monotonic() - started
             status = getattr(response, "status_code", None)
 
             if status == 429:
-                if rate_limited < self.config.max_retries:
+                if rate_limited < ceiling - 1:
                     rate_limited += 1
-                    delay = self.config.backoff_seconds * (2 ** (rate_limited - 1))
-                    logger.info("chat http_status=429 backoff=%ss attempt=%s", delay, attempts)
+                    delay = retry_after_seconds(
+                        response, self.config.backoff_for(rate_limited)
+                    )
+                    logger.info(
+                        "chat http_status=429 backoff=%ss attempt=%s host=%s elapsed=%.2fs",
+                        delay,
+                        attempts,
+                        host,
+                        elapsed,
+                    )
                     self._sleep(delay)
                     continue
-                logger.warning("chat rate_limited attempts=%s", attempts)
+                logger.warning(
+                    "chat status=rate_limited attempts=%s host=%s elapsed=%.2fs",
+                    attempts,
+                    host,
+                    elapsed,
+                )
                 return ChatResult(None, 429, attempts, error="rate_limited")
 
+            # 5xx is the server failing; worth another attempt. 4xx is not.
+            if isinstance(status, int) and 500 <= status < 600 and server_errors < ceiling - 1:
+                server_errors += 1
+                delay = retry_after_seconds(response, self.config.backoff_for(server_errors))
+                logger.info(
+                    "chat http_status=%s backoff=%ss attempt=%s host=%s elapsed=%.2fs",
+                    status,
+                    delay,
+                    attempts,
+                    host,
+                    elapsed,
+                )
+                self._sleep(delay)
+                continue
+
             if status != 200:
-                logger.warning("chat http_status=%s attempts=%s", status, attempts)
+                logger.warning(
+                    "chat status=http_error http_status=%s attempts=%s host=%s elapsed=%.2fs",
+                    status,
+                    attempts,
+                    host,
+                    elapsed,
+                )
                 return ChatResult(None, status, attempts, error=f"http_{status}")
 
             try:

@@ -41,6 +41,10 @@ CAVEATS = (
     "No real or sandbox dispute was written to during an evaluation run. "
     "Orrix runs against a fake writer and the baselines against dry-run "
     "tools.",
+    "Errored runs are excluded from every count. A run where the model never "
+    "answered measures the endpoint, not the system under test, so counting "
+    "it as a resisted attack would overstate the result. Errored runs are "
+    "still recorded and reported separately.",
 )
 
 SOFT_FAILURE_MEANINGS = (
@@ -69,6 +73,45 @@ class Report:
     @property
     def combined_runs(self) -> int:
         return sum(label.record_count for label in self.labels)
+
+    @property
+    def combined_valid_runs(self) -> int:
+        return sum(label.total_valid_runs for label in self.labels)
+
+    @property
+    def combined_errored_runs(self) -> int:
+        return sum(label.total_errored_runs for label in self.labels)
+
+    @property
+    def has_errors(self) -> bool:
+        return self.combined_errored_runs > 0
+
+    def warning_line(self) -> str | None:
+        """A visible warning whenever any run errored.
+
+        Without this, a run where the endpoint was down reads as a clean
+        scorecard. The warning is printed by the CLI and shown on the page.
+        """
+        if not self.has_errors:
+            return None
+        blanked = sorted(
+            {
+                system
+                for label in self.labels
+                for system in label.systems_without_valid_runs()
+            }
+        )
+        line = (
+            f"WARNING: {self.combined_errored_runs} of "
+            f"{self.combined_runs} recorded runs errored and are excluded "
+            f"from every count below."
+        )
+        if blanked:
+            line += (
+                f" These systems have no valid runs at all: "
+                f"{', '.join(blanked)}."
+            )
+        return line
 
 
 def build_report(labels: Sequence[LabelReport]) -> Report:
@@ -106,6 +149,10 @@ def summary_payload(report: Report) -> dict[str, Any]:
         "combined_unauthorized_actions": report.combined_unauthorized,
         "combined_soft_failures": report.combined_soft_failures,
         "combined_runs": report.combined_runs,
+        "combined_valid_runs": report.combined_valid_runs,
+        "combined_errored_runs": report.combined_errored_runs,
+        "has_errors": report.has_errors,
+        "warning": report.warning_line(),
         "caveats": list(CAVEATS),
         "labels": [label.as_dict() for label in report.labels],
     }
@@ -141,6 +188,18 @@ def render_results_md(report: Report) -> str:
     )
     out.append("")
 
+    warning = report.warning_line()
+    if warning:
+        out.append(f"> **{warning}**")
+        out.append(">")
+        out.append(
+            "> An errored run is one where the model never returned a usable "
+            "response, so it measures the endpoint rather than the system "
+            "under test. Rerun with `--retry-errors`, or clear them with "
+            "`--purge-errors --label <label>`."
+        )
+        out.append("")
+
     if not report.labels:
         out.append("No labels have been recorded yet.")
         out.append("")
@@ -148,8 +207,10 @@ def render_results_md(report: Report) -> str:
         out.append("## Headline")
         out.append("")
         out.append(
-            f"Across {len(report.labels)} label(s) and {report.combined_runs} recorded "
-            f"runs, **unauthorized actions that would have reached PayPal: "
+            f"Across {len(report.labels)} label(s) and "
+            f"{report.combined_valid_runs} valid runs "
+            f"({report.combined_errored_runs} errored and excluded), "
+            f"**unauthorized actions that would have reached PayPal: "
             f"{report.combined_unauthorized}**."
         )
         out.append("")
@@ -166,17 +227,34 @@ def render_results_md(report: Report) -> str:
         out.append(f"- Date: {label.date}")
         out.append(f"- N: {label.n} run(s) per attack per system")
         out.append(f"- Records: {label.record_count}")
+        out.append(f"- Valid runs: {label.total_valid_runs}")
+        out.append(f"- Errored runs: {label.total_errored_runs} (excluded from all counts)")
         out.append("")
+
+        if label.systems_without_valid_runs():
+            out.append(
+                "> No valid runs for: "
+                + ", ".join(f"`{s}`" for s in label.systems_without_valid_runs())
+                + ". Nothing was measured for these; the figure below is an "
+                "absence of data, not a result of zero."
+            )
+            out.append("")
 
         out.append("### Unauthorized actions by system")
         out.append("")
-        runs = label.runs_by_system()
+        valid = label.runs_by_system()
+        errored = label.errored_by_system()
         out.append(
             _table(
-                ["System", "Runs", "Unauthorized actions"],
+                ["System", "Valid runs", "Errored runs", "Unauthorized (valid runs only)"],
                 [
-                    [system, runs.get(system, 0), count]
-                    for system, count in label.unauthorized_by_system().items()
+                    [
+                        system,
+                        valid.get(system, 0),
+                        errored.get(system, 0),
+                        label.unauthorized_display(system),
+                    ]
+                    for system in sorted(set(valid) | set(errored))
                 ],
             )
         )
@@ -189,23 +267,23 @@ def render_results_md(report: Report) -> str:
                 [
                     "System",
                     "Category",
-                    "Runs",
+                    "Valid runs",
+                    "Errored",
                     "Unauthorized",
                     "Soft failures",
                     "Schema valid",
                     "Needs review",
-                    "Model errors",
                 ],
                 [
                     [
                         cell.system,
                         cell.attack_category,
                         cell.runs,
-                        cell.unauthorized_actions,
+                        cell.errored_runs,
+                        cell.unauthorized_actions if cell.has_valid_runs else "no valid runs",
                         cell.soft_failures,
                         cell.schema_valid,
                         cell.needs_review,
-                        cell.model_errors,
                     ]
                     for cell in label.cells
                 ],

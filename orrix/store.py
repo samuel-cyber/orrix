@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,7 +45,7 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         connection.executescript(_SCHEMA)
 
 
@@ -57,7 +58,7 @@ def insert_event_if_absent(
     concurrent deliveries of the same event_id cannot both see themselves as
     new. This is the only duplicate check in the pipeline.
     """
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO events (event_id, event_type, dispute_id, received_at, status)
@@ -69,18 +70,18 @@ def insert_event_if_absent(
 
 
 def set_event_status(event_id: str, status: str) -> None:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         connection.execute("UPDATE events SET status = ? WHERE event_id = ?", (status, event_id))
 
 
 def get_event(event_id: str) -> dict[str, Any] | None:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         row = connection.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
         return dict(row) if row else None
 
 
 def count_events() -> int:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         return connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
 
@@ -91,7 +92,7 @@ def save_case_snapshot(dispute_id: str, snapshot: dict[str, Any]) -> None:
     lifted out of a webhook payload, which is what makes out-of-order
     deliveries safe.
     """
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         connection.execute(
             """
             INSERT INTO cases (dispute_id, snapshot_json, fetched_at)
@@ -105,7 +106,7 @@ def save_case_snapshot(dispute_id: str, snapshot: dict[str, Any]) -> None:
 
 
 def get_case(dispute_id: str) -> dict[str, Any] | None:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         row = connection.execute(
             "SELECT * FROM cases WHERE dispute_id = ?", (dispute_id,)
         ).fetchone()
@@ -120,5 +121,5 @@ def get_case(dispute_id: str) -> dict[str, Any] | None:
 
 
 def count_cases() -> int:
-    with connect() as connection:
+    with closing(connect()) as connection, connection:
         return connection.execute("SELECT COUNT(*) FROM cases").fetchone()[0]

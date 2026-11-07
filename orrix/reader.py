@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 from pydantic import ValidationError
 
 from .claim_form import ClaimForm, ClaimFormError, build_claim_form
+from .errors import FailureDetail, describe, host_of, retry_after_seconds
 
 logger = logging.getLogger("orrix.reader")
 
@@ -65,6 +66,18 @@ DID_NOT_RUN_REASONS = frozenset({REASON_NOT_CONFIGURED, REASON_NO_BUYER_TEXT})
 STATUS_OK = "ok"
 STATUS_NEEDS_REVIEW = "needs_review"
 
+#: Reasons that mean the model never returned anything usable. These are
+#: endpoint failures: counting them as results makes a broken run look like
+#: a passing one.
+NO_RESPONSE_REASONS = frozenset(
+    {
+        REASON_TRANSPORT_ERROR,
+        REASON_HTTP_ERROR,
+        REASON_RATE_LIMITED,
+        REASON_EMPTY_RESPONSE,
+    }
+)
+
 
 @dataclass(frozen=True)
 class ReaderConfig:
@@ -81,10 +94,28 @@ class ReaderConfig:
     timeout: float = 30.0
     max_retries: int = 2
     retry_backoff_seconds: float = 1.0
+    #: Delay before each retry, in order. A retryable failure gets at most
+    #: max_attempts tries in total: one plus one per entry here.
+    retry_backoff_schedule: tuple[float, ...] = (1.0, 3.0)
 
     def __post_init__(self) -> None:
         if self.max_retries < 0:
             raise ValueError("max_retries cannot be negative")
+
+    @property
+    def max_attempts(self) -> int:
+        """Total request attempts for a retryable failure, including the first."""
+        return len(self.retry_backoff_schedule) + 1
+
+    def backoff_for(self, retry_number: int) -> float:
+        """Delay before retry N (1-based), from the schedule."""
+        if retry_number < 1:
+            return 0.0
+        index = min(retry_number, len(self.retry_backoff_schedule)) - 1
+        if not self.retry_backoff_schedule:
+            return 0.0
+        # retry_backoff_seconds scales the schedule, so a test can zero it.
+        return self.retry_backoff_schedule[index] * self.retry_backoff_seconds
 
     @property
     def completions_url(self) -> str:
@@ -100,10 +131,22 @@ class ReaderResult:
     reason: str | None = None
     attempts: int = 0
     http_status: int | None = None
+    #: Scrubbed detail of the last transport failure, when there was one.
+    failure: FailureDetail | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.form is not None
+
+    @property
+    def model_never_answered(self) -> bool:
+        """True when no usable response arrived, as opposed to a bad one.
+
+        A run in this state is evidence about the endpoint, not about the
+        system under test, so the harness records it as errored and keeps it
+        out of every denominator.
+        """
+        return self.reason in NO_RESPONSE_REASONS
 
 
 class ChatClient(Protocol):
@@ -234,13 +277,17 @@ def read_claim(
     }
 
     attempts = 0
+    transport_retries = 0
     rate_limit_retries = 0
+    server_error_retries = 0
     parse_retries = 0
-    # One parse retry, plus the rate-limit allowance, plus the first attempt.
-    attempt_ceiling = config.max_retries + 3
+    # One parse retry on top of the request-level attempt allowance.
+    attempt_ceiling = config.max_attempts + 2
+    last_detail: FailureDetail | None = None
 
     while attempts < attempt_ceiling:
         attempts += 1
+        started = time.monotonic()
         try:
             response = http_client.post(
                 config.completions_url,
@@ -248,10 +295,24 @@ def read_claim(
                 json=payload,
                 timeout=config.timeout,
             )
-        except Exception:
-            # Transport detail may quote the URL or headers; log a code only.
+        except Exception as error:
+            elapsed = time.monotonic() - started
+            # Scrubbed by orrix.errors: host only, no URL, no token. A bare
+            # reason code here is what made a three-hour outage look like a
+            # normal result, so the detail is logged on purpose.
+            last_detail = describe(error, config.completions_url, attempts, elapsed)
             logger.warning(
-                "reader status=needs_review reason=%s attempts=%s",
+                "reader status=retrying reason=%s " + last_detail.log_fields(),
+                REASON_TRANSPORT_ERROR,
+            )
+            transport_retries += 1
+            if transport_retries < config.max_attempts:
+                delay = config.backoff_for(transport_retries)
+                logger.info("reader backoff=%ss before attempt=%s", delay, attempts + 1)
+                sleep(delay)
+                continue
+            logger.warning(
+                "reader status=needs_review reason=%s attempts=%s " + last_detail.log_fields(),
                 REASON_TRANSPORT_ERROR,
                 attempts,
             )
@@ -260,25 +321,35 @@ def read_claim(
                 status=STATUS_NEEDS_REVIEW,
                 reason=REASON_TRANSPORT_ERROR,
                 attempts=attempts,
+                failure=last_detail,
             )
 
+        elapsed = time.monotonic() - started
         status_code = getattr(response, "status_code", None)
 
         if status_code == 429:
-            if rate_limit_retries < config.max_retries:
+            if rate_limit_retries < config.max_attempts - 1:
                 rate_limit_retries += 1
-                delay = config.retry_backoff_seconds * (2 ** (rate_limit_retries - 1))
+                delay = retry_after_seconds(
+                    response, config.backoff_for(rate_limit_retries)
+                )
                 logger.info(
-                    "reader status=retrying http_status=429 attempt=%s backoff=%ss",
+                    "reader status=retrying http_status=429 attempt=%s backoff=%ss "
+                    "host=%s elapsed=%.2fs",
                     attempts,
                     delay,
+                    host_of(config.completions_url),
+                    elapsed,
                 )
                 sleep(delay)
                 continue
             logger.warning(
-                "reader status=needs_review reason=%s http_status=429 attempts=%s",
+                "reader status=needs_review reason=%s http_status=429 attempts=%s "
+                "host=%s elapsed=%.2fs",
                 REASON_RATE_LIMITED,
                 attempts,
+                host_of(config.completions_url),
+                elapsed,
             )
             return ReaderResult(
                 form=None,
@@ -288,12 +359,35 @@ def read_claim(
                 http_status=429,
             )
 
+        # A 5xx is the server failing, not the request being wrong, so it is
+        # worth another attempt. A 4xx is not.
+        if isinstance(status_code, int) and 500 <= status_code < 600:
+            if server_error_retries < config.max_attempts - 1:
+                server_error_retries += 1
+                delay = retry_after_seconds(
+                    response, config.backoff_for(server_error_retries)
+                )
+                logger.info(
+                    "reader status=retrying http_status=%s attempt=%s backoff=%ss "
+                    "host=%s elapsed=%.2fs",
+                    status_code,
+                    attempts,
+                    delay,
+                    host_of(config.completions_url),
+                    elapsed,
+                )
+                sleep(delay)
+                continue
+
         if status_code != 200:
             logger.warning(
-                "reader status=needs_review reason=%s http_status=%s attempts=%s",
+                "reader status=needs_review reason=%s http_status=%s attempts=%s "
+                "host=%s elapsed=%.2fs",
                 REASON_HTTP_ERROR,
                 status_code,
                 attempts,
+                host_of(config.completions_url),
+                elapsed,
             )
             return ReaderResult(
                 form=None,

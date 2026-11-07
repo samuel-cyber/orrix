@@ -149,6 +149,7 @@ def run_defended_agent(
 
         if not result.ok:
             outcome.error = result.error
+            outcome.failure = result.failure
             return outcome
 
         reply = result.text or ""

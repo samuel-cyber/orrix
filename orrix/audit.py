@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -143,7 +144,7 @@ class AuditLog:
         return connection
 
     def init_db(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(_SCHEMA)
 
     def append(
@@ -165,7 +166,7 @@ class AuditLog:
 
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT seq, entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1"
             ).fetchone()
@@ -219,7 +220,7 @@ class AuditLog:
         return AuditEntry(**{**entry.__dict__, "entry_hash": entry_hash})
 
     def entries(self) -> list[AuditEntry]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM audit_log ORDER BY seq ASC").fetchall()
         return [
             AuditEntry(
@@ -257,7 +258,7 @@ class AuditLog:
 
         # The head anchor catches a row appended directly into the table,
         # including one whose own hashes were recomputed correctly.
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             head = connection.execute("SELECT seq, entry_hash, entries FROM audit_head").fetchone()
 
         if head is None:

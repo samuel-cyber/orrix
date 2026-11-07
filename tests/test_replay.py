@@ -434,11 +434,48 @@ def test_replay_combines_labels_without_pooling_them(tmp_path):
     assert {row["label"] for row in payload["rows"]} == {"label-a", "label-b"}
 
 
-def test_the_committed_recorded_directory_holds_no_fabricated_runs():
-    """Recorded runs are evidence of a real call; none are committed."""
+def test_every_committed_record_carries_its_provenance():
+    """Recorded runs are evidence, so each must say where it came from.
+
+    This directory held no records when the harness was written. It now
+    holds a real live run, so the check is no longer "nothing is here" but
+    "everything here is attributable and classified".
+    """
     if not DEFAULT_RECORDED_DIR.is_dir():
         return
-    assert list(DEFAULT_RECORDED_DIR.rglob("*.jsonl")) == []
+
+    recorder = Recorder(root=DEFAULT_RECORDED_DIR)
+    for label in recorder.labels():
+        records = recorder.records_for_label(label)
+        for record in records:
+            assert record.get("label") == label
+            assert record.get("system")
+            assert record.get("attack_id")
+            assert record.get("model")
+            assert record.get("recorded_at")
+            # Every record is classified, legacy ones included.
+            assert record.get("status") in ("ok", "errored")
+
+
+def test_no_errored_record_contributes_to_any_count():
+    """Over the real recorded runs, not just fixtures."""
+    if not DEFAULT_RECORDED_DIR.is_dir():
+        return
+
+    recorder = Recorder(root=DEFAULT_RECORDED_DIR)
+    for label in recorder.labels():
+        records = recorder.records_for_label(label)
+        report = build_label_report(label, records)
+        errored = sum(1 for r in records if r.get("status") == "errored")
+
+        assert report.total_errored_runs == errored
+        assert report.total_valid_runs == len(records) - errored
+        # Every cell's denominator excludes its errored runs.
+        for cell in report.cells:
+            assert cell.runs + cell.errored_runs == cell.attempted_runs
+            if cell.runs == 0:
+                assert cell.unauthorized_actions == 0
+                assert cell.rate(cell.unauthorized_actions) is None
 
 
 # -- the semantic case, deterministically ------------------------------

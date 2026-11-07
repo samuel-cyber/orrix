@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from attacks.chat import ChatClient, ChatConfig
+from attacks.status import STATUS_ERRORED, STATUS_OK
 from attacks.corpus import Attack
 from baselines.defended_agent import run_defended_agent
 from baselines.naive_agent import run_naive_agent
@@ -118,6 +120,19 @@ class RunRecord:
     refused: bool = False
     model_error: str | None = None
     steps: int = 0
+
+    #: "ok" when the model answered and the run measured something; "errored"
+    #: when no usable response arrived. Errored runs are kept but excluded
+    #: from every denominator.
+    status: str = STATUS_OK
+    error_reason: str | None = None
+    #: Scrubbed detail of the last transport failure: class, message, host,
+    #: attempt, elapsed. Never a URL or a credential.
+    failure: dict[str, Any] | None = None
+    elapsed_seconds: float = 0.0
+    #: The agent's own replies, for the baselines. Recorded so a surprising
+    #: result can be read back rather than guessed at.
+    replies: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -223,6 +238,7 @@ def run_orrix(
     an evaluation run never touches the operational database.
     """
     record = _blank_record(label, SYSTEM_ORRIX, attack, run_index, reader_config.model)
+    started = time.monotonic()
     snapshot = load_snapshot(attack.text)
     seller_input = parse_seller_input(SELLER_INPUT)
 
@@ -240,6 +256,23 @@ def run_orrix(
     record.needs_review = not result.ok
     record.model_error = result.reason if not result.ok else None
     record.steps = result.attempts
+    if result.failure is not None:
+        record.failure = result.failure.as_dict()
+
+    # The endpoint never answered: this run measures the endpoint, not Orrix.
+    if result.model_never_answered:
+        record.status = STATUS_ERRORED
+        record.error_reason = result.reason
+        record.elapsed_seconds = round(time.monotonic() - started, 3)
+        logger.warning(
+            "run errored system=%s attack=%s run=%s reason=%s elapsed=%.2fs",
+            SYSTEM_ORRIX,
+            attack.id,
+            run_index,
+            result.reason,
+            record.elapsed_seconds,
+        )
+        return record
 
     if result.form is not None:
         form = result.form
@@ -303,6 +336,16 @@ def run_orrix(
         1 for call in writer.calls if not record.approval_created
     ) + sum(1 for call in writer.calls if call["tool"] != "provide_evidence")
 
+    record.elapsed_seconds = round(time.monotonic() - started, 3)
+    logger.info(
+        "run ok system=%s attack=%s run=%s unauthorized=%s soft=%s elapsed=%.2fs",
+        SYSTEM_ORRIX,
+        attack.id,
+        run_index,
+        record.unauthorized_actions,
+        len(record.soft_failures),
+        record.elapsed_seconds,
+    )
     return record
 
 
@@ -316,12 +359,14 @@ def run_baseline(
 ) -> RunRecord:
     """Run one of the single-LLM baselines against the same record."""
     record = _blank_record(label, system, attack, run_index, chat_config.model)
+    started = time.monotonic()
     snapshot = load_snapshot(attack.text)
 
     runner = run_naive_agent if system == SYSTEM_NAIVE else run_defended_agent
     outcome = runner(snapshot, client)
 
     record.tool_calls = [call.as_dict() for call in outcome.tool_calls]
+    record.replies = list(outcome.replies)
     record.unauthorized_actions = outcome.unauthorized_actions
     record.schema_valid = outcome.schema_valid
     record.refused = outcome.refused
@@ -332,4 +377,31 @@ def run_baseline(
     record.approval_created = False
     record.executor_status = "accepted_claim" if outcome.unauthorized_actions else "no_action"
     record.needs_review = outcome.refused
+    record.elapsed_seconds = round(time.monotonic() - started, 3)
+
+    if outcome.failure is not None:
+        record.failure = outcome.failure.as_dict()
+
+    # No usable answer at any step, and no tool was ever driven: the run
+    # measures the endpoint rather than the agent.
+    if outcome.never_answered:
+        record.status = STATUS_ERRORED
+        record.error_reason = outcome.error
+        logger.warning(
+            "run errored system=%s attack=%s run=%s reason=%s elapsed=%.2fs",
+            system,
+            attack.id,
+            run_index,
+            outcome.error,
+            record.elapsed_seconds,
+        )
+    else:
+        logger.info(
+            "run ok system=%s attack=%s run=%s unauthorized=%s elapsed=%.2fs",
+            system,
+            attack.id,
+            run_index,
+            record.unauthorized_actions,
+            record.elapsed_seconds,
+        )
     return record

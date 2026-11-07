@@ -32,6 +32,18 @@ class EvaluationRow:
     #: Which provider/model run produced this row. Empty for a summary
     #: written before labels existed.
     label: str = ""
+    #: Runs where the model answered, and runs where it never did. Errored
+    #: runs are in no denominator.
+    valid_runs: int = 0
+    errored_runs: int = 0
+
+    @property
+    def has_valid_runs(self) -> bool:
+        return (self.valid_runs or self.runs) > 0
+
+    @property
+    def unauthorized_display(self) -> str:
+        return str(self.unauthorized_actions) if self.has_valid_runs else "no valid runs"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +53,10 @@ class EvaluationRow:
             "unauthorized_actions": self.unauthorized_actions,
             "soft_failures": self.soft_failures,
             "label": self.label,
+            "valid_runs": self.valid_runs or self.runs,
+            "errored_runs": self.errored_runs,
+            "has_valid_runs": self.has_valid_runs,
+            "unauthorized_display": self.unauthorized_display,
         }
 
 
@@ -59,8 +75,39 @@ class EvaluationLabel:
     record_count: int = 0
     total_unauthorized: int = 0
     total_soft_failures: int = 0
+    total_valid_runs: int = 0
+    total_errored_runs: int = 0
     systems: tuple[str, ...] = ()
     unauthorized_by_system: tuple[tuple[str, int], ...] = ()
+    valid_by_system: tuple[tuple[str, int], ...] = ()
+    errored_by_system: tuple[tuple[str, int], ...] = ()
+    systems_without_valid_runs: tuple[str, ...] = ()
+
+    @property
+    def has_errors(self) -> bool:
+        return self.total_errored_runs > 0
+
+    def per_system(self) -> tuple[dict[str, Any], ...]:
+        """One row per system: valid, errored, and the figure to display."""
+        valid = dict(self.valid_by_system)
+        errored = dict(self.errored_by_system)
+        unauthorized = dict(self.unauthorized_by_system)
+        rows = []
+        for system in sorted(set(valid) | set(errored) | set(unauthorized)):
+            valid_runs = valid.get(system, 0)
+            rows.append(
+                {
+                    "system": system,
+                    "valid_runs": valid_runs,
+                    "errored_runs": errored.get(system, 0),
+                    "unauthorized_actions": unauthorized.get(system, 0),
+                    "has_valid_runs": valid_runs > 0,
+                    "unauthorized_display": (
+                        str(unauthorized.get(system, 0)) if valid_runs else "no valid runs"
+                    ),
+                }
+            )
+        return tuple(rows)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,7 +118,12 @@ class EvaluationLabel:
             "record_count": self.record_count,
             "total_unauthorized": self.total_unauthorized,
             "total_soft_failures": self.total_soft_failures,
+            "total_valid_runs": self.total_valid_runs,
+            "total_errored_runs": self.total_errored_runs,
+            "has_errors": self.has_errors,
             "systems": list(self.systems),
+            "systems_without_valid_runs": list(self.systems_without_valid_runs),
+            "per_system": list(self.per_system()),
             "unauthorized_by_system": [
                 {"system": system, "unauthorized_actions": count}
                 for system, count in self.unauthorized_by_system
@@ -91,6 +143,10 @@ class EvaluationResults:
     labels: tuple[EvaluationLabel, ...] = ()
     combined_unauthorized: int = 0
     combined_soft_failures: int = 0
+    combined_valid_runs: int = 0
+    combined_errored_runs: int = 0
+    #: Rendered next to the numbers whenever any run errored.
+    warning: str | None = None
     caveats: tuple[str, ...] = ()
     notes_available: bool = False
     message: str | None = None
@@ -110,6 +166,10 @@ class EvaluationResults:
         return tuple(label.label for label in self.labels)
 
     @property
+    def has_errors(self) -> bool:
+        return self.combined_errored_runs > 0
+
+    @property
     def total_unauthorized(self) -> int:
         return sum(row.unauthorized_actions for row in self.rows)
 
@@ -127,6 +187,10 @@ class EvaluationResults:
             "labels": [label.as_dict() for label in self.labels],
             "combined_unauthorized": self.combined_unauthorized,
             "combined_soft_failures": self.combined_soft_failures,
+            "combined_valid_runs": self.combined_valid_runs,
+            "combined_errored_runs": self.combined_errored_runs,
+            "has_errors": self.has_errors,
+            "warning": self.warning,
             "caveats": list(self.caveats),
             "notes_available": self.notes_available,
             "message": self.message,
@@ -171,6 +235,8 @@ def _parse_rows(raw: Any) -> tuple[EvaluationRow, ...]:
                 unauthorized_actions=_int(item.get("unauthorized_actions")),
                 soft_failures=_int(item.get("soft_failures")),
                 label=_text(item.get("label")),
+                valid_runs=_int(item.get("valid_runs")) or _int(item.get("runs")),
+                errored_runs=_int(item.get("errored_runs")),
             )
         )
     return tuple(rows)
@@ -197,6 +263,14 @@ def _parse_labels(raw: Any) -> tuple[EvaluationLabel, ...]:
                         (_text(entry.get("system")), _int(entry.get("unauthorized_actions")))
                     )
         systems = item.get("systems")
+        blanked = item.get("systems_without_valid_runs")
+
+        def _pairs(key: str) -> tuple[tuple[str, int], ...]:
+            raw = item.get(key)
+            if isinstance(raw, Mapping):
+                return tuple((str(k), _int(v)) for k, v in sorted(raw.items()))
+            return ()
+
         labels.append(
             EvaluationLabel(
                 label=name,
@@ -206,8 +280,15 @@ def _parse_labels(raw: Any) -> tuple[EvaluationLabel, ...]:
                 record_count=_int(item.get("record_count")),
                 total_unauthorized=_int(item.get("total_unauthorized")),
                 total_soft_failures=_int(item.get("total_soft_failures")),
+                total_valid_runs=_int(item.get("total_valid_runs")),
+                total_errored_runs=_int(item.get("total_errored_runs")),
                 systems=tuple(str(s) for s in systems) if isinstance(systems, list) else (),
                 unauthorized_by_system=tuple(pairs),
+                valid_by_system=_pairs("valid_runs_by_system"),
+                errored_by_system=_pairs("errored_by_system"),
+                systems_without_valid_runs=(
+                    tuple(str(s) for s in blanked) if isinstance(blanked, list) else ()
+                ),
             )
         )
     return tuple(labels)
@@ -313,6 +394,10 @@ def load_results(
         or sum(row.unauthorized_actions for row in rows),
         combined_soft_failures=_int(payload.get("combined_soft_failures"))
         or sum(row.soft_failures for row in rows),
+        combined_valid_runs=_int(payload.get("combined_valid_runs"))
+        or sum(row.valid_runs or row.runs for row in rows),
+        combined_errored_runs=_int(payload.get("combined_errored_runs")),
+        warning=_text(payload.get("warning")) or None,
         caveats=caveats,
         notes_available=notes_available,
         results_path=str(path),

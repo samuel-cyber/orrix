@@ -296,29 +296,78 @@ def test_persistent_429_gives_needs_review(config):
     assert len(client.sleeps) == config.max_retries
 
 
-def test_backoff_grows(config):
+def test_backoff_follows_the_configured_schedule(config):
+    """Three attempts in total, waiting 1s then 3s."""
     client = FakeClient([FakeResponse(429)])
     spaced = ReaderConfig(
         base_url=config.base_url,
         api_key=API_KEY,
         model="test-model",
-        max_retries=3,
         retry_backoff_seconds=1.0,
     )
 
     read_claim("text", CEILING, spaced, client, sleep=client.sleep)
 
-    assert client.sleeps == [1.0, 2.0, 4.0]
+    assert spaced.max_attempts == 3
+    assert client.sleeps == [1.0, 3.0]
+    assert len(client.requests) == 3
 
 
-def test_server_error_gives_needs_review_without_retrying(config):
+def test_the_backoff_schedule_is_configurable(config):
+    client = FakeClient([FakeResponse(429)])
+    custom = ReaderConfig(
+        base_url=config.base_url,
+        api_key=API_KEY,
+        model="test-model",
+        retry_backoff_seconds=1.0,
+        retry_backoff_schedule=(0.5, 2.0, 5.0),
+    )
+
+    read_claim("text", CEILING, custom, client, sleep=client.sleep)
+
+    assert custom.max_attempts == 4
+    assert client.sleeps == [0.5, 2.0, 5.0]
+
+
+def test_a_server_error_is_retried_then_reported(config):
+    """A 5xx is the server failing, so it earns the full attempt allowance."""
     client = FakeClient([FakeResponse(500)])
 
     result = read_claim("text", CEILING, config, client, sleep=client.sleep)
 
     assert result.status == STATUS_NEEDS_REVIEW
     assert result.http_status == 500
+    assert len(client.requests) == config.max_attempts == 3
+    assert client.sleeps == [0.0, 0.0]  # schedule scaled to zero in tests
+
+
+def test_a_client_error_is_not_retried(config):
+    """A 4xx means the request was wrong; repeating it changes nothing."""
+    client = FakeClient([FakeResponse(400)])
+
+    result = read_claim("text", CEILING, config, client, sleep=client.sleep)
+
+    assert result.status == STATUS_NEEDS_REVIEW
+    assert result.http_status == 400
     assert len(client.requests) == 1
+
+
+def test_a_transport_error_is_retried_then_reported(config):
+    class Exploding:
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, url, **kwargs):
+            self.posts += 1
+            raise OSError("connection reset by peer")
+
+    client = Exploding()
+    result = read_claim("text", CEILING, config, client, sleep=lambda _: None)
+
+    assert result.reason == "transport_error"
+    assert client.posts == config.max_attempts == 3
+    assert result.failure is not None
+    assert result.failure.exception_class == "OSError"
 
 
 def test_transport_failure_gives_needs_review(config):

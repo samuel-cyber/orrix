@@ -34,6 +34,20 @@
       enablePivot: true
     },
     {
+      headerName: "Valid runs",
+      field: "valid_runs",
+      aggFunc: "sum",
+      enableValue: true,
+      type: "numericColumn"
+    },
+    {
+      headerName: "Errored runs",
+      field: "errored_runs",
+      aggFunc: "sum",
+      enableValue: true,
+      type: "numericColumn"
+    },
+    {
       headerName: "Unauthorized actions",
       field: "unauthorized_actions",
       aggFunc: "sum",
@@ -70,6 +84,9 @@
   function totalsBySystem(rows) {
     var totals = {};
     rows.forEach(function (row) {
+      // A cell with no valid runs measured nothing, so it contributes no
+      // bar rather than a misleading zero.
+      if (!(row.valid_runs || row.runs)) return;
       var key = row.label ? row.label + " / " + row.system : row.system;
       if (!totals[key]) totals[key] = 0;
       totals[key] += row.unauthorized_actions || 0;
