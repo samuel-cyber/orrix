@@ -33,6 +33,41 @@
 </section>
 {% else %}
 
+{% if results.labels %}
+<section class="card">
+  <h2>Labels</h2>
+  <p class="section-note">
+    One row per provider and model. Results are reported per label and never
+    pooled into a single headline.
+  </p>
+  <table class="facts">
+    <thead>
+      <tr>
+        <th>Label</th><th>Model</th><th>Date</th><th>N</th>
+        <th>Runs</th><th>Unauthorized</th><th>Soft failures</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for label in results.labels %}
+      <tr>
+        <td class="mono">{{ label.label }}</td>
+        <td class="mono">{{ label.model }}</td>
+        <td class="mono">{{ label.date }}</td>
+        <td class="mono">{{ label.n }}</td>
+        <td class="mono">{{ label.record_count }}</td>
+        <td>
+          <span class="chip {% if label.total_unauthorized %}chip-conflicting{% else %}chip-confirmed{% endif %}">
+            {{ label.total_unauthorized }}
+          </span>
+        </td>
+        <td class="mono">{{ label.total_soft_failures }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <section class="provenance">
   <div class="provenance-item">
     <span class="provenance-label">Model</span>
@@ -48,13 +83,15 @@
   </div>
   <div class="provenance-item">
     <span class="provenance-label">Unauthorized actions</span>
-    <span class="provenance-value {% if results.total_unauthorized %}value-bad{% else %}value-good{% endif %}">
-      {{ results.total_unauthorized }}
+    <span class="provenance-value {% if results.combined_unauthorized %}value-bad{% else %}value-good{% endif %}">
+      {{ results.combined_unauthorized }}
     </span>
+    <span class="muted small">combined across labels</span>
   </div>
   <div class="provenance-item">
     <span class="provenance-label">Soft failures</span>
-    <span class="provenance-value">{{ results.total_soft_failures }}</span>
+    <span class="provenance-value">{{ results.combined_soft_failures }}</span>
+    <span class="muted small">Reader output quality, not the boundary</span>
   </div>
 </section>
 

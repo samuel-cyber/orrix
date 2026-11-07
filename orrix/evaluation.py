@@ -29,6 +29,9 @@ class EvaluationRow:
     runs: int
     unauthorized_actions: int
     soft_failures: int
+    #: Which provider/model run produced this row. Empty for a summary
+    #: written before labels existed.
+    label: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +40,42 @@ class EvaluationRow:
             "runs": self.runs,
             "unauthorized_actions": self.unauthorized_actions,
             "soft_failures": self.soft_failures,
+            "label": self.label,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationLabel:
+    """One provider/model run, reported on its own terms.
+
+    Results are never pooled into a single headline: a label is the unit
+    that a model id and a date actually describe.
+    """
+
+    label: str
+    model: str
+    date: str
+    n: int
+    record_count: int = 0
+    total_unauthorized: int = 0
+    total_soft_failures: int = 0
+    systems: tuple[str, ...] = ()
+    unauthorized_by_system: tuple[tuple[str, int], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "model": self.model,
+            "date": self.date,
+            "n": self.n,
+            "record_count": self.record_count,
+            "total_unauthorized": self.total_unauthorized,
+            "total_soft_failures": self.total_soft_failures,
+            "systems": list(self.systems),
+            "unauthorized_by_system": [
+                {"system": system, "unauthorized_actions": count}
+                for system, count in self.unauthorized_by_system
+            ],
         }
 
 
@@ -49,6 +88,9 @@ class EvaluationResults:
     date: str | None = None
     n: int = 0
     rows: tuple[EvaluationRow, ...] = ()
+    labels: tuple[EvaluationLabel, ...] = ()
+    combined_unauthorized: int = 0
+    combined_soft_failures: int = 0
     caveats: tuple[str, ...] = ()
     notes_available: bool = False
     message: str | None = None
@@ -62,6 +104,10 @@ class EvaluationResults:
     @property
     def categories(self) -> tuple[str, ...]:
         return tuple(sorted({row.attack_category for row in self.rows}))
+
+    @property
+    def label_names(self) -> tuple[str, ...]:
+        return tuple(label.label for label in self.labels)
 
     @property
     def total_unauthorized(self) -> int:
@@ -78,6 +124,9 @@ class EvaluationResults:
             "date": self.date,
             "n": self.n,
             "rows": [row.as_dict() for row in self.rows],
+            "labels": [label.as_dict() for label in self.labels],
+            "combined_unauthorized": self.combined_unauthorized,
+            "combined_soft_failures": self.combined_soft_failures,
             "caveats": list(self.caveats),
             "notes_available": self.notes_available,
             "message": self.message,
@@ -121,9 +170,47 @@ def _parse_rows(raw: Any) -> tuple[EvaluationRow, ...]:
                 runs=_int(item.get("runs")),
                 unauthorized_actions=_int(item.get("unauthorized_actions")),
                 soft_failures=_int(item.get("soft_failures")),
+                label=_text(item.get("label")),
             )
         )
     return tuple(rows)
+
+
+def _parse_labels(raw: Any) -> tuple[EvaluationLabel, ...]:
+    if not isinstance(raw, list):
+        return ()
+    labels: list[EvaluationLabel] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        name = _text(item.get("label"))
+        if not name:
+            continue
+        by_system = item.get("unauthorized_by_system")
+        pairs: list[tuple[str, int]] = []
+        if isinstance(by_system, Mapping):
+            pairs = [(str(k), _int(v)) for k, v in sorted(by_system.items())]
+        elif isinstance(by_system, list):
+            for entry in by_system:
+                if isinstance(entry, Mapping):
+                    pairs.append(
+                        (_text(entry.get("system")), _int(entry.get("unauthorized_actions")))
+                    )
+        systems = item.get("systems")
+        labels.append(
+            EvaluationLabel(
+                label=name,
+                model=_text(item.get("model")) or "unrecorded",
+                date=_text(item.get("date")) or "unrecorded",
+                n=_int(item.get("n")),
+                record_count=_int(item.get("record_count")),
+                total_unauthorized=_int(item.get("total_unauthorized")),
+                total_soft_failures=_int(item.get("total_soft_failures")),
+                systems=tuple(str(s) for s in systems) if isinstance(systems, list) else (),
+                unauthorized_by_system=tuple(pairs),
+            )
+        )
+    return tuple(labels)
 
 
 def load_caveats(notes_path: str | Path) -> tuple[tuple[str, ...], bool]:
@@ -206,12 +293,26 @@ def load_results(
         )
 
     declared_n = _int(payload.get("n"))
+
+    # Caveats come from docs/RESULTS.md when it exists; the harness also
+    # writes them into the summary, so the page is never left showing bare
+    # numbers because a notes file went missing.
+    if not caveats:
+        embedded = payload.get("caveats")
+        if isinstance(embedded, list):
+            caveats = tuple(_text(item) for item in embedded if _text(item))
+
     return EvaluationResults(
         available=True,
         model=_text(payload.get("model")) or None,
         date=_text(payload.get("date")) or None,
         n=declared_n or sum(row.runs for row in rows),
         rows=rows,
+        labels=_parse_labels(payload.get("labels")),
+        combined_unauthorized=_int(payload.get("combined_unauthorized_actions"))
+        or sum(row.unauthorized_actions for row in rows),
+        combined_soft_failures=_int(payload.get("combined_soft_failures"))
+        or sum(row.soft_failures for row in rows),
         caveats=caveats,
         notes_available=notes_available,
         results_path=str(path),

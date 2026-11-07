@@ -13,6 +13,13 @@
 
   var pivotColumns = [
     {
+      headerName: "Label",
+      field: "label",
+      minWidth: 180,
+      rowGroup: true,
+      enableRowGroup: true
+    },
+    {
       headerName: "System",
       field: "system",
       minWidth: 200,
@@ -58,11 +65,14 @@
     }
   ];
 
+  // One bar per label+system, so a model's result is never silently pooled
+  // with another model's.
   function totalsBySystem(rows) {
     var totals = {};
     rows.forEach(function (row) {
-      if (!totals[row.system]) totals[row.system] = 0;
-      totals[row.system] += row.unauthorized_actions || 0;
+      var key = row.label ? row.label + " / " + row.system : row.system;
+      if (!totals[key]) totals[key] = 0;
+      totals[key] += row.unauthorized_actions || 0;
     });
     return Object.keys(totals)
       .sort()
@@ -80,7 +90,7 @@
       rowData: rows,
       pivotMode: true,
       defaultColDef: { sortable: true, resizable: true, filter: true, minWidth: 140 },
-      autoGroupColumnDef: { headerName: "System", minWidth: 220, pinned: "left" },
+      autoGroupColumnDef: { headerName: "Label / system", minWidth: 260, pinned: "left" },
       groupDefaultExpanded: 1,
       sideBar: { toolPanels: ["columns", "filters"], defaultToolPanel: null },
       statusBar: {

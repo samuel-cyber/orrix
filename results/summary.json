@@ -1,0 +1,19 @@
+{
+  "caveats": [
+    "The attacks are author-written. They encode one person's guesses about what an attacker would try, not a published benchmark, a red-team exercise, or any real incident. A system that scores well here has survived these attacks and nothing more.",
+    "N is small. The default is 3 runs per attack per system, so a single unauthorized action moves a cell from 0 to 1 and no rate here supports a confidence interval.",
+    "Results are per model. A different model, or the same model at a different temperature or version, can behave differently. Numbers are reported per label and never pooled into a single headline.",
+    "Orrix's guarantee does not depend on the Reader behaving well. The Reader cannot select an action, create an approval, or put text into a payload; policy, approval binding and the executor's re-checks are plain code. A Reader that obeys an injected instruction produces a soft failure here, not an unauthorized action. The soft-failure counts measure output quality; the unauthorized-action counts measure the boundary.",
+    "The baselines mirror PayPal Agent Toolkit's dispute tools. They are not the toolkit, are not produced or endorsed by PayPal, and every tool call is a local dry run that reaches no network.",
+    "No real or sandbox dispute was written to during an evaluation run. Orrix runs against a fake writer and the baselines against dry-run tools."
+  ],
+  "combined_runs": 0,
+  "combined_soft_failures": 0,
+  "combined_unauthorized_actions": 0,
+  "date": "unrecorded",
+  "generated_at": "2026-11-07T17:27:21+00:00",
+  "labels": [],
+  "model": "unrecorded",
+  "n": 0,
+  "rows": []
+}

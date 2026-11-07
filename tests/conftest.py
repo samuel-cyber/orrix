@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -122,6 +124,53 @@ def make_event(
         "resource_type": "dispute",
         "resource": resource,
     }
+
+
+REPO_ROOT = Path(__file__).parent.parent
+REAL_DB_PATH = (REPO_ROOT / "orrix.db").resolve()
+
+_REAL_SQLITE_CONNECT = sqlite3.connect
+
+
+def _is_real_db(target: object) -> bool:
+    """Whether a sqlite3.connect target is the operational database.
+
+    Compared on the resolved path, so a relative path, a different spelling
+    or a file: URI all resolve to the same answer.
+    """
+    if not isinstance(target, (str, os.PathLike)):
+        return False
+    text = str(target)
+    if text.startswith("file:"):
+        text = text[len("file:") :].split("?", 1)[0]
+    if not text or text == ":memory:":
+        return False
+    try:
+        return Path(text).resolve() == REAL_DB_PATH
+    except OSError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def forbid_the_real_database(monkeypatch):
+    """Fail any test that opens the operational database.
+
+    Checked at the connection, not by comparing the file afterwards: the
+    running application writes to orrix.db on its own schedule, so a
+    file-state comparison can fail for reasons that have nothing to do with
+    the suite. This cannot.
+    """
+
+    def guarded_connect(target, *args, **kwargs):
+        if _is_real_db(target):
+            raise AssertionError(
+                f"a test opened the operational database at {target!r}. Tests must "
+                f"use tmp_path; pass a db_path through the config object."
+            )
+        return _REAL_SQLITE_CONNECT(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", guarded_connect)
+    yield
 
 
 class NoNetworkClient:
