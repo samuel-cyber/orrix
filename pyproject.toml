@@ -23,6 +23,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 
+[project.scripts]
+orrix-seed = "orrix.demo_seed:main"
+
 [tool.setuptools]
 packages = ["orrix", "orrix.web"]
 

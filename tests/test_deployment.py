@@ -262,7 +262,7 @@ def test_headers_are_present_on_a_redirect_and_an_error(client):
 # -- the public surface ------------------------------------------------
 
 
-def test_only_the_root_health_login_webhook_and_static_are_public():
+def test_only_the_root_health_login_webhook_static_and_order_ingest_are_public():
     """The unauthenticated surface, pinned.
 
     /static is public because the login page needs its stylesheet. It serves
@@ -271,9 +271,18 @@ def test_only_the_root_health_login_webhook_and_static_are_public():
     The bare "/" is public because it is the landing page, which reads only
     the on-disk evaluation summary, never dispute data. is_public("/x") is
     False: the allowlist entry is the exact root only, so no deeper route
-    is exposed by it.
+    is exposed by it. /api/orders is machine ingest: it carries no session,
+    authenticates with a bearer token, is rate-limited, and refuses every
+    request when LEDGER_API_KEY is unset.
     """
-    assert set(PUBLIC_PATHS) == {"/", "/health", "/login", "/webhooks/paypal", "/static"}
+    assert set(PUBLIC_PATHS) == {
+        "/",
+        "/health",
+        "/login",
+        "/webhooks/paypal",
+        "/static",
+        "/api/orders",
+    }
 
 
 def test_static_serves_only_assets_with_no_data(client):
@@ -289,7 +298,15 @@ def test_static_serves_only_assets_with_no_data(client):
 
 @pytest.mark.parametrize(
     "path",
-    ["/cases", "/audit", "/evaluation", "/api/cases", "/api/audit", "/api/evaluation"],
+    [
+        "/cases",
+        "/orders",
+        "/audit",
+        "/evaluation",
+        "/api/cases",
+        "/api/audit",
+        "/api/evaluation",
+    ],
 )
 def test_every_other_route_needs_a_session(client, path):
     response = client.get(path)

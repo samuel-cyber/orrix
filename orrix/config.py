@@ -102,6 +102,11 @@ class AppConfig:
     lab_daily_cap: int = 150
     lab_per_minute: int = 5
 
+    # The order ledger's ingest token. A bearer value for POST /api/orders,
+    # held to a constant-time comparison. Unset disables the endpoint.
+    ledger_api_key: str | None = field(default=None, repr=False)
+    ledger_max_per_minute: int = 60
+
     # Optional AG Grid Enterprise licence. Injected into the page at render
     # time so the grid runs without a watermark. Never logged, never
     # committed; without it the grid still works.
@@ -181,6 +186,7 @@ class AppConfig:
             f"ag_grid_license_set={self.ag_grid_license_is_set}",
             f"login_max_failures={self.login_max_failures}",
             f"lab_daily_cap={self.lab_daily_cap}",
+            f"ledger_api_key_set={self.ledger_api_key_is_set}",
         ]
 
     # -- derived service configs -----------------------------------------
@@ -188,6 +194,10 @@ class AppConfig:
     @property
     def ag_grid_license_is_set(self) -> bool:
         return bool(self.ag_grid_license_key)
+
+    @property
+    def ledger_api_key_is_set(self) -> bool:
+        return bool(self.ledger_api_key)
 
     @property
     def reader_is_configured(self) -> bool:
@@ -245,6 +255,8 @@ def load_config() -> AppConfig:
         login_lockout_seconds=int(_number("LOGIN_LOCKOUT_SECONDS", 600)),
         lab_daily_cap=int(_number("LAB_DAILY_CAP", 150)),
         lab_per_minute=int(_number("LAB_PER_MINUTE", 5)),
+        ledger_api_key=os.environ.get("LEDGER_API_KEY"),
+        ledger_max_per_minute=int(_number("LEDGER_MAX_PER_MINUTE", 60)),
         ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),

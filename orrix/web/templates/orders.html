@@ -7,21 +7,214 @@
     <h1>Order ledger</h1>
     <p class="muted">
       Seller-asserted shipment records, matched to disputes by the seller's
-      transaction id.
+      transaction id. A row is recorded once and versioned; a re-import that
+      changes it bumps the version.
     </p>
+  </div>
+  <div class="page-head-side">
+    <span class="pill pill-quiet">Rows {{ orders | length }}</span>
+    {% if ledger_api_key_set %}
+    <span class="pill pill-ok">Ingest key set</span>
+    {% else %}
+    <span class="pill pill-warn">Ingest key unset</span>
+    {% endif %}
   </div>
 </div>
 
-<section class="card">
-  <p class="section-note">
-    The ledger arrives in a later phase: an add form, CSV import with a
-    per-row error preview, and a searchable table.
-  </p>
-  <p class="muted">
+<div class="alert alert-info" role="note">
+  <p>
     Ledger entries are seller-asserted, not carrier-verified. Orrix records
     when a row was stored so it can show whether a record predates the
     dispute; it never treats that as proof the carrier confirmed anything.
   </p>
-  <p><a href="/cases" class="btn">Back to cases</a></p>
+</div>
+
+{% if notice %}
+<div class="alert alert-ok" role="status">
+  <p>{{ notice }}</p>
+</div>
+{% endif %}
+
+{% if errors %}
+<div class="alert alert-error" role="alert">
+  <ul class="error-list">
+    {% for error in errors %}
+    <li>{{ error }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div class="columns">
+  <section class="card">
+    <h2>Add or update a row</h2>
+    <p class="section-note">
+      Validated to exactly the ledger schema. <code>recorded_at</code> is set
+      by the server, never from this form.
+    </p>
+    <form method="post" action="/orders/add" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label for="seller_transaction_id">Seller transaction id</label>
+      <input type="text" id="seller_transaction_id" name="seller_transaction_id"
+             maxlength="64" autocomplete="off" required
+             value="{{ form.get('seller_transaction_id', '') }}">
+
+      <label for="order_ref">Order reference</label>
+      <input type="text" id="order_ref" name="order_ref"
+             maxlength="64" autocomplete="off" required
+             value="{{ form.get('order_ref', '') }}">
+
+      <label for="carrier">Carrier</label>
+      <input type="text" id="carrier" name="carrier"
+             maxlength="40" autocomplete="off" required
+             value="{{ form.get('carrier', '') }}">
+
+      <label for="tracking_number">Tracking number</label>
+      <input type="text" id="tracking_number" name="tracking_number"
+             maxlength="40" autocomplete="off" required
+             value="{{ form.get('tracking_number', '') }}">
+
+      <div class="field-row">
+        <div>
+          <label for="shipped_at">Shipped on</label>
+          <input type="date" id="shipped_at" name="shipped_at"
+                 value="{{ form.get('shipped_at', '') }}">
+        </div>
+        <div>
+          <label for="delivered_at">Delivered on</label>
+          <input type="date" id="delivered_at" name="delivered_at"
+                 value="{{ form.get('delivered_at', '') }}">
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div>
+          <label for="amount">Amount</label>
+          <input type="text" id="amount" name="amount" inputmode="decimal"
+                 autocomplete="off" value="{{ form.get('amount', '') }}">
+        </div>
+        <div>
+          <label for="currency">Currency</label>
+          <input type="text" id="currency" name="currency" maxlength="3"
+                 autocomplete="off" value="{{ form.get('currency', '') }}">
+        </div>
+      </div>
+
+      <label for="item_label">Item label</label>
+      <input type="text" id="item_label" name="item_label"
+             maxlength="{{ item_label_max }}" autocomplete="off"
+             value="{{ form.get('item_label', '') }}">
+
+      <button type="submit" class="btn btn-primary">Save row</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Import CSV</h2>
+    <p class="section-note">
+      Paste a header row plus one line per order. Columns:
+      <span class="mono small">{{ csv_columns | join(', ') }}</span>.
+      Nothing is written until you confirm the validated preview.
+    </p>
+    <form method="post" action="/orders/import" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label for="csv_text">CSV text</label>
+      <textarea id="csv_text" name="csv_text" rows="10" spellcheck="false"
+                placeholder="seller_transaction_id,order_ref,carrier,tracking_number&hellip;">{{ csv_text }}</textarea>
+
+      {% if preview is not none and preview %}
+      <div class="preview">
+        <p class="muted small">{{ preview | length }} row(s) validated:</p>
+        <table class="facts ledger-preview">
+          <thead>
+            <tr>
+              <th>Line</th>
+              <th>Transaction</th>
+              <th>Order ref</th>
+              <th>Carrier</th>
+              <th>Tracking</th>
+              <th>Item</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in preview %}
+            <tr>
+              <td class="mono">{{ row.line }}</td>
+              <td class="mono">{{ row.seller_transaction_id }}</td>
+              <td>{{ row.order_ref }}</td>
+              <td>{{ row.carrier }}</td>
+              <td class="mono">{{ row.tracking_number }}</td>
+              <td>{{ row.item_label }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+      <div class="form-actions">
+        <button type="submit" name="commit" value="no" class="btn">Validate</button>
+        <button type="submit" name="commit" value="yes" class="btn btn-primary">Import validated rows</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2>Ledger</h2>
+    <div class="toolbar">
+      <label class="visually-hidden" for="orders-filter">Filter orders</label>
+      <input type="search" id="orders-filter" placeholder="Filter rows&hellip;"
+             autocomplete="off" data-orders-filter>
+    </div>
+  </div>
+
+  {% if orders %}
+  <table class="facts ledger-table" data-orders-table>
+    <thead>
+      <tr>
+        <th>Transaction</th>
+        <th>Order ref</th>
+        <th>Carrier</th>
+        <th>Tracking</th>
+        <th>Delivered</th>
+        <th>Amount</th>
+        <th>Item</th>
+        <th>Source</th>
+        <th>Recorded</th>
+        <th>Version</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for order in orders %}
+      <tr>
+        <td class="mono">{{ order.seller_transaction_id }}</td>
+        <td>{{ order.order_ref }}</td>
+        <td>{{ order.carrier }}</td>
+        <td class="mono">{{ order.tracking_number }}</td>
+        <td class="mono">{{ order.delivered_at or "&mdash;" | safe }}</td>
+        <td class="mono">{{ order.amount }}{% if order.currency %} {{ order.currency }}{% endif %}</td>
+        <td>{{ order.item_label }}</td>
+        <td><span class="origin origin-{{ order.source }}">{{ order.source }}</span></td>
+        <td class="mono small">{{ order.recorded_at or "&mdash;" | safe }}</td>
+        <td class="mono">{{ order.version }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small" data-orders-empty hidden>No rows match the filter.</p>
+  {% else %}
+  <p class="muted">
+    No ledger rows yet. Add one by hand or import a CSV above; a case matches
+    a row by the seller's transaction id.
+  </p>
+  {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/orders.js"></script>
 {% endblock %}

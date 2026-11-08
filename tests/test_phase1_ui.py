@@ -180,7 +180,16 @@ def test_the_landing_page_carries_the_trust_diagram_as_inline_svg(tmp_path, snap
 
 
 def test_the_landing_page_plus_deeper_routes_are_the_pinned_public_set():
-    assert set(PUBLIC_PATHS) == {"/", "/health", "/login", "/webhooks/paypal", "/static"}
+    # "/api/orders" is public because machine ingest cannot hold a session; it
+    # still enforces its own bearer token, constant-time, rate-limited.
+    assert set(PUBLIC_PATHS) == {
+        "/",
+        "/health",
+        "/login",
+        "/webhooks/paypal",
+        "/static",
+        "/api/orders",
+    }
 
 
 # -- no inline code anywhere -------------------------------------------

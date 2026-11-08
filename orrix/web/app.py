@@ -11,13 +11,16 @@ is the only importer of orrix.paypal_write.
 
 from __future__ import annotations
 
+import csv
+import hmac
 import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -30,6 +33,16 @@ from ..errors import host_of
 from ..executor import build_evidence_payload, execute
 from ..facts import FactStatus, build_facts
 from ..evaluation import load_results
+from ..orders import (
+    ITEM_LABEL_MAX_LENGTH,
+    ORDER_SOURCES,
+    SOURCE_SELLER_LEDGER,
+    OrderLedgerError,
+    apply_matched,
+    evidence_checklist,
+    match_for_facts,
+    parse_order,
+)
 from ..pipeline import process_case, status_label
 from ..policy import PROVIDE_EVIDENCE
 from ..reader import STATUS_NEEDS_REVIEW, extract_buyer_text
@@ -53,15 +66,35 @@ AG_GRID_VERSION = "32.3.3"
 HTMX_VERSION = "2.0.3"
 
 # The unauthenticated surface, pinned. "/" is exact: is_public("/") is true
-# only for the root, so every deeper route still needs a session.
-PUBLIC_PATHS = ("/", "/health", "/webhooks/paypal", "/login", "/static")
+# only for the root, so every deeper route still needs a session. /api/orders
+# is machine ingest: it authenticates with a bearer token, not a session.
+PUBLIC_PATHS = ("/", "/health", "/webhooks/paypal", "/login", "/static", "/api/orders")
 
 ORIGIN_LABELS = {
     "paypal_record": "PayPal record",
     "seller_input": "Seller input",
+    SOURCE_SELLER_LEDGER: "Seller ledger",
     "derived": "Orrix (derived)",
     "buyer_text": "Buyer text (untrusted, display only)",
 }
+
+# The ledger CSV importer. Columns beyond this set are ignored so an export
+# from a spreadsheet with extra columns still imports; the required columns
+# must all be present or the whole file is refused.
+ORDER_CSV_COLUMNS = (
+    "seller_transaction_id",
+    "order_ref",
+    "carrier",
+    "tracking_number",
+    "shipped_at",
+    "delivered_at",
+    "amount",
+    "currency",
+    "item_label",
+)
+ORDER_CSV_REQUIRED = ("seller_transaction_id", "order_ref", "carrier", "tracking_number")
+ORDER_CSV_MAX_ROWS = 500
+ORDER_CSV_MAX_CHARS = 200_000
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 router = APIRouter()
@@ -239,12 +272,24 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
             )
         fact_rows.sort(key=lambda row: row["name"])
 
+    # The ledger row this dispute's seller transaction matches, if any, and a
+    # read-only readiness view of it. Both are pure reads; the approval is
+    # what binds to the row and its version.
+    ledger_row = match_for_facts(services.order_ledger, facts)
+    ledger_checklist = (
+        evidence_checklist(facts, ledger_row, snapshot.get("create_time"))
+        if facts is not None
+        else None
+    )
+
     return {
         "dispute_id": dispute_id,
         "snapshot": snapshot,
         "view": view,
         "facts": facts,
         "fact_rows": fact_rows,
+        "ledger_row": ledger_row,
+        "ledger_checklist": ledger_checklist,
         # Buyer text is carried as a single escaped string and rendered only
         # inside its own labelled block.
         "buyer_text": extract_buyer_text(snapshot),
@@ -573,9 +618,318 @@ def cases_page(request: Request) -> Response:
     return templates.TemplateResponse(request, "cases.html", _context(request))
 
 
+# -- order ledger -------------------------------------------------------
+
+
+def _order_rows(records) -> list[dict[str, Any]]:
+    """Display rows for the ledger table. Codes, ids and amounts only."""
+    rows = []
+    for record in records:
+        rows.append(
+            {
+                "row_id": record.row_id,
+                "version": record.version,
+                "seller_transaction_id": record.seller_transaction_id,
+                "order_ref": record.order_ref,
+                "carrier": record.carrier,
+                "tracking_number": record.tracking_number,
+                "shipped_at": record.shipped_at,
+                "delivered_at": record.delivered_at,
+                "amount": record.amount,
+                "currency": record.currency,
+                "item_label": record.item_label,
+                "source": record.source,
+                "recorded_at": _display_timestamp(record.recorded_at),
+            }
+        )
+    return rows
+
+
+def _orders_context(
+    request: Request,
+    *,
+    notice: str | None = None,
+    errors: list[str] | None = None,
+    preview: list[dict[str, Any]] | None = None,
+    csv_text: str = "",
+    form: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    services = _services(request)
+    return _context(
+        request,
+        orders=_order_rows(services.list_orders()),
+        notice=notice,
+        errors=errors or [],
+        preview=preview,
+        csv_text=csv_text,
+        form=form or {},
+        item_label_max=ITEM_LABEL_MAX_LENGTH,
+        csv_columns=list(ORDER_CSV_COLUMNS),
+        ledger_api_key_set=services.config.ledger_api_key_is_set,
+    )
+
+
+_FORM_FIELDS = (
+    "seller_transaction_id",
+    "order_ref",
+    "carrier",
+    "tracking_number",
+    "shipped_at",
+    "delivered_at",
+    "amount",
+    "currency",
+    "item_label",
+)
+
+
+def _submitted_order(form: Mapping[str, str]) -> dict[str, str]:
+    return {name: (form.get(name, "") or "").strip() for name in _FORM_FIELDS}
+
+
 @router.get("/orders", response_class=HTMLResponse)
 def orders_page(request: Request) -> Response:
-    return templates.TemplateResponse(request, "orders.html", _context(request))
+    return templates.TemplateResponse(request, "orders.html", _orders_context(request))
+
+
+@router.post("/orders/add", response_class=HTMLResponse)
+def orders_add(
+    request: Request,
+    seller_transaction_id: str = Form(""),
+    order_ref: str = Form(""),
+    carrier: str = Form(""),
+    tracking_number: str = Form(""),
+    shipped_at: str = Form(""),
+    delivered_at: str = Form(""),
+    amount: str = Form(""),
+    currency: str = Form(""),
+    item_label: str = Form(""),
+    csrf_token: str = Form(""),
+) -> Response:
+    """Add or update one ledger row by hand.
+
+    The row is validated to exactly the ledger schema before it is stored.
+    recorded_at is set by the server, never accepted from the form, so the
+    recorded_before_dispute test stays honest.
+    """
+    if not _csrf_ok(request, csrf_token):
+        return _csrf_failure(request)
+
+    services = _services(request)
+    submitted = {
+        "seller_transaction_id": seller_transaction_id,
+        "order_ref": order_ref,
+        "carrier": carrier,
+        "tracking_number": tracking_number,
+        "shipped_at": shipped_at,
+        "delivered_at": delivered_at,
+        "amount": amount,
+        "currency": currency,
+        "item_label": item_label,
+    }
+    submitted = _submitted_order(submitted)
+
+    try:
+        order = parse_order(submitted)
+    except OrderLedgerError as error:
+        return templates.TemplateResponse(
+            request,
+            "orders.html",
+            _orders_context(
+                request,
+                errors=_readable_errors(error),
+                form=submitted,
+            ),
+            status_code=400,
+        )
+
+    record, status = services.ingest_order(order, "manual")
+    services.audit.append(
+        actor="admin",
+        action=f"web.order_{status}",
+        origin_tag=OriginTag.SELLER_APPROVAL,
+        payload={"row_id": record.row_id, "version": record.version},
+    )
+    return RedirectResponse("/orders", status_code=303)
+
+
+@router.post("/orders/import", response_class=HTMLResponse)
+def orders_import(
+    request: Request,
+    csv_text: str = Form(""),
+    commit: str = Form(""),
+    csrf_token: str = Form(""),
+) -> Response:
+    """Validate a pasted CSV, then import it once the operator confirms.
+
+    Validation always runs first. Nothing is written until the same text is
+    submitted again with commit=yes, so a bad file never half-imports.
+    """
+    if not _csrf_ok(request, csrf_token):
+        return _csrf_failure(request)
+
+    services = _services(request)
+    text = csv_text or ""
+    if len(text) > ORDER_CSV_MAX_CHARS:
+        return templates.TemplateResponse(
+            request,
+            "orders.html",
+            _orders_context(
+                request,
+                errors=[f"CSV is too large; keep it under {ORDER_CSV_MAX_CHARS} characters."],
+                csv_text=text,
+            ),
+            status_code=400,
+        )
+
+    rows, errors = _parse_order_csv(text)
+    if errors:
+        return templates.TemplateResponse(
+            request,
+            "orders.html",
+            _orders_context(request, errors=errors, csv_text=text),
+            status_code=400,
+        )
+    if not rows:
+        return templates.TemplateResponse(
+            request,
+            "orders.html",
+            _orders_context(
+                request, errors=["No data rows found in the CSV."], csv_text=text
+            ),
+            status_code=400,
+        )
+
+    if commit != "yes":
+        preview = [
+            {"line": line, **_submitted_order(row.model_dump())}
+            for line, row in rows
+        ]
+        return templates.TemplateResponse(
+            request,
+            "orders.html",
+            _orders_context(
+                request,
+                notice=f"{len(rows)} row(s) validated. Confirm to import.",
+                preview=preview,
+                csv_text=text,
+            ),
+        )
+
+    counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+    for _line, order in rows:
+        _record, status = services.ingest_order(order, "csv")
+        counts[status] = counts.get(status, 0) + 1
+
+    services.audit.append(
+        actor="admin",
+        action="web.orders_imported",
+        origin_tag=OriginTag.SELLER_APPROVAL,
+        payload=counts,
+    )
+    return templates.TemplateResponse(
+        request,
+        "orders.html",
+        _orders_context(
+            request,
+            notice=(
+                f"Imported {len(rows)} row(s): "
+                f"{counts['inserted']} inserted, {counts['updated']} updated, "
+                f"{counts['unchanged']} unchanged."
+            ),
+        ),
+    )
+
+
+def _parse_order_csv(text: str) -> tuple[list[tuple[int, Any]], list[str]]:
+    """Parse pasted CSV into validated orders. Returns (rows, error strings).
+
+    Errors name the line and the field, never the value, so a bad import
+    cannot echo attacker-controlled text back into the page unquoted.
+    """
+    if not text.strip():
+        return [], ["Paste CSV text to import."]
+
+    reader = csv.DictReader(StringIO(text))
+    if reader.fieldnames is None:
+        return [], ["The CSV has no header row."]
+
+    header = {(name or "").strip() for name in reader.fieldnames}
+    missing = [name for name in ORDER_CSV_REQUIRED if name not in header]
+    if missing:
+        return [], [f"The CSV is missing required column(s): {', '.join(missing)}."]
+
+    rows: list[tuple[int, Any]] = []
+    errors: list[str] = []
+    for line, raw in enumerate(reader, start=2):
+        if line - 1 > ORDER_CSV_MAX_ROWS:
+            errors.append(f"Too many rows; the limit is {ORDER_CSV_MAX_ROWS}.")
+            break
+        values = {name: (raw.get(name, "") or "").strip() for name in ORDER_CSV_COLUMNS}
+        try:
+            rows.append((line, parse_order(values)))
+        except OrderLedgerError as error:
+            for message in _readable_errors(error):
+                errors.append(f"Row {line}: {message}")
+    return rows, errors
+
+
+def _orders_authorized(request: Request) -> bool:
+    """Constant-time bearer check against the configured ingest key."""
+    expected = _services(request).config.ledger_api_key
+    if not expected:
+        return False
+    header = request.headers.get("Authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return False
+    return hmac.compare_digest(token.strip(), expected)
+
+
+@router.post("/api/orders")
+async def api_orders(request: Request) -> Response:
+    """Machine ingest for the ledger. Bearer token, constant-time, rate-limited.
+
+    Never trusts a recorded_at from the caller: the ledger stamps it. The
+    bearer key is compared with hmac.compare_digest and is never echoed.
+    """
+    services = _services(request)
+    if not services.config.ledger_api_key_is_set:
+        return JSONResponse({"error": "ledger_ingest_disabled"}, status_code=503)
+    if not _orders_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    client = _client_address(request)
+    allowed, wait = services.order_limiter.check(client)
+    if not allowed:
+        response = JSONResponse({"error": "rate_limited"}, status_code=429)
+        response.headers["Retry-After"] = str(wait)
+        return response
+    services.order_limiter.record(client)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - any malformed body is a bad request
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid_body"}, status_code=400)
+
+    try:
+        order = parse_order(body)
+    except OrderLedgerError as error:
+        return JSONResponse({"error": "invalid_order", "detail": _readable_errors(error)}, status_code=422)
+
+    record, status = services.ingest_order(order, "api")
+    services.audit.append(
+        actor="api",
+        action=f"api.order_{status}",
+        origin_tag=OriginTag.SELLER_APPROVAL,
+        payload={"row_id": record.row_id, "version": record.version},
+    )
+    code = 201 if status == "inserted" else 200
+    return JSONResponse(
+        {"status": status, "row_id": record.row_id, "version": record.version},
+        status_code=code,
+    )
 
 
 def _lab_context(
@@ -903,6 +1257,9 @@ def approve(
 
     seller_input = services.get_seller_input(dispute_id)
     facts = build_facts(snapshot, seller_input=seller_input, expected_dispute_id=dispute_id)
+    # Overlay the ledger the same way the executor will, so the payload shown
+    # and approved is the payload the executor rebuilds and checks.
+    facts, ledger_row = apply_matched(services.order_ledger, facts)
 
     try:
         payload = build_evidence_payload(facts)
@@ -918,6 +1275,8 @@ def approve(
             action=PROVIDE_EVIDENCE,
             payload=payload,
             dispute_version=current,
+            ledger_row_id=ledger_row.row_id if ledger_row else None,
+            ledger_row_version=ledger_row.version if ledger_row else None,
         )
     except ApprovalError as error:
         services.set_result(
@@ -1073,6 +1432,9 @@ def _confirmation_rows(snapshot: Any) -> list[dict[str, str]]:
 
 
 def _readable_errors(error: Exception) -> list[str]:
+    # An OrderLedgerError already carries value-free "field: reason" lines.
+    if isinstance(error, OrderLedgerError) and error.errors:
+        return list(error.errors)
     if isinstance(error, ValidationError):
         messages = []
         for item in error.errors():

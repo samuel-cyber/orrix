@@ -62,6 +62,11 @@ class Approval:
     dispute_version: DisputeVersion
     approved_by: str
     created_at: str
+    # Which ledger row, at which version, this approval was granted against.
+    # None when the case had no ledger match. Folded into the approval id, so
+    # an approval cannot be retargeted at a different row or a later version.
+    ledger_row_id: int | None = None
+    ledger_row_version: int | None = None
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -80,7 +85,12 @@ class Approval:
 
     def recompute_id(self) -> str:
         return compute_approval_id(
-            self.dispute_id, self.action, json.loads(self.payload_json), self.dispute_version
+            self.dispute_id,
+            self.action,
+            json.loads(self.payload_json),
+            self.dispute_version,
+            ledger_row_id=self.ledger_row_id,
+            ledger_row_version=self.ledger_row_version,
         )
 
     def is_intact(self) -> bool:
@@ -92,22 +102,28 @@ def compute_approval_id(
     action: str,
     payload: Any,
     dispute_version: DisputeVersion,
+    ledger_row_id: int | None = None,
+    ledger_row_version: int | None = None,
 ) -> str:
     """Hash of the canonical JSON of what is being approved.
 
     Changing the payload, the action, the dispute or the version produces a
-    different id, so an approval cannot be retargeted or quietly edited.
+    different id, so an approval cannot be retargeted or quietly edited. The
+    ledger row id and version are folded in the same way when present: an
+    approval granted against one ledger row, at one version, does not survive
+    a change to either. Both keys are omitted when there is no ledger match,
+    so an approval with no row keeps the id it has always had.
     """
-    return sha256_hex(
-        canonical_json(
-            {
-                "dispute_id": dispute_id,
-                "action": action,
-                "payload": payload,
-                "dispute_version": list(dispute_version.as_tuple()),
-            }
-        )
-    )
+    material: dict[str, Any] = {
+        "dispute_id": dispute_id,
+        "action": action,
+        "payload": payload,
+        "dispute_version": list(dispute_version.as_tuple()),
+    }
+    if ledger_row_id is not None:
+        material["ledger_row_id"] = ledger_row_id
+        material["ledger_row_version"] = ledger_row_version
+    return sha256_hex(canonical_json(material))
 
 
 def create_approval(
@@ -116,6 +132,8 @@ def create_approval(
     payload: Mapping[str, Any],
     dispute_version: DisputeVersion,
     approved_by: str = APPROVAL_ACTOR_SELLER,
+    ledger_row_id: int | None = None,
+    ledger_row_version: int | None = None,
 ) -> Approval:
     """Record a seller's explicit approval of one action.
 
@@ -135,9 +153,21 @@ def create_approval(
     if not isinstance(dispute_version, DisputeVersion):
         raise ApprovalError("dispute_version must be a DisputeVersion")
 
+    if ledger_row_id is not None and not isinstance(ledger_row_id, int):
+        raise ApprovalError("ledger_row_id must be an integer when given")
+    if ledger_row_version is not None and not isinstance(ledger_row_version, int):
+        raise ApprovalError("ledger_row_version must be an integer when given")
+
     dispute_id = dispute_id.strip()
     payload_dict = json.loads(canonical_json(payload))
-    approval_id = compute_approval_id(dispute_id, action, payload_dict, dispute_version)
+    approval_id = compute_approval_id(
+        dispute_id,
+        action,
+        payload_dict,
+        dispute_version,
+        ledger_row_id=ledger_row_id,
+        ledger_row_version=ledger_row_version,
+    )
 
     return Approval(
         approval_id=approval_id,
@@ -147,4 +177,6 @@ def create_approval(
         dispute_version=dispute_version,
         approved_by=approved_by,
         created_at=datetime.now(timezone.utc).isoformat(),
+        ledger_row_id=ledger_row_id,
+        ledger_row_version=ledger_row_version,
     )

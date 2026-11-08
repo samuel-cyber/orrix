@@ -313,6 +313,20 @@
         <span><strong>Policy</strong> has no blocking flag on this case.</span>
         {% endif %}
       </li>
+      <li>
+        {% if ledger_checklist and ledger_checklist.matched %}
+          {% if ledger_checklist.recorded_before_dispute %}
+          <svg class="check-icon check-ok" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
+          <span><strong>Ledger match</strong> order <span class="mono">{{ ledger_checklist.order_ref }}</span> matches this dispute and was recorded before it was opened.</span>
+          {% else %}
+          <svg class="check-icon check-sell" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>
+          <span><strong>Ledger match</strong> order <span class="mono">{{ ledger_checklist.order_ref }}</span> matches, but it was recorded after the dispute was opened.</span>
+          {% endif %}
+        {% else %}
+        <svg class="check-icon check-no" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7 7l6 6M13 7l-6 6"/></svg>
+        <span><strong>No ledger match</strong> add this order on the Orders page to bind the approval to a versioned ledger row.</span>
+        {% endif %}
+      </li>
     </ul>
 
     <details class="payload-details">

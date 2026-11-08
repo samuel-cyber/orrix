@@ -15,6 +15,7 @@ from typing import Any, Callable
 from ..audit import AuditLog
 from ..config import AppConfig
 from ..executor import ExecutedApprovals, ExecutorDeps, build_writer
+from ..orders import OrderInput, OrderLedger, OrderRecord, match_for_facts
 from ..paypal import SandboxPayPalClient
 from ..pipeline import CaseViewStore, PipelineDeps
 from ..seller_input import SellerEvidenceInput, parse_seller_input
@@ -86,12 +87,19 @@ class Services:
         self.lab_limiter = LabRateLimiter(per_minute=config.lab_per_minute)
         self._lab_presets: tuple[dict[str, str], ...] | None = None
 
+        # The seller's own order ledger, in its own table. Ingest is guarded
+        # by a bearer token and a sliding window; a bad token or an exhausted
+        # window is refused before anything is written.
+        self.order_ledger = OrderLedger(config.db_path)
+        self.order_limiter = LabRateLimiter(per_minute=config.ledger_max_per_minute)
+
         self.pipeline_deps = PipelineDeps(
             audit=self.audit,
             case_views=self.case_views,
             policy_config=config.policy_config(),
             reader_config=config.reader_config(),
             reader_client=reader_client,
+            order_ledger=self.order_ledger,
         )
 
     # -- password ---------------------------------------------------------
@@ -133,6 +141,7 @@ class Services:
             executed=self.executed,
             policy_config=self.config.policy_config(),
             seller_input=seller_input,
+            order_ledger=self.order_ledger,
         )
 
     # -- stored cases -----------------------------------------------------
@@ -247,6 +256,7 @@ class Services:
             case_views=self.case_views,
             policy_config=self.config.policy_config(),
             reader_config=None,
+            order_ledger=self.order_ledger,
         )
 
     def case_view(self, dispute_id: str):
@@ -356,6 +366,27 @@ class Services:
 
     def set_seller_input(self, dispute_id: str, parsed: SellerEvidenceInput) -> None:
         self._seller_inputs[dispute_id] = parsed
+
+    # -- order ledger ------------------------------------------------------
+
+    def list_orders(self) -> list[OrderRecord]:
+        try:
+            return self.order_ledger.all()
+        except Exception as error:  # noqa: BLE001 - an unreadable table is "empty"
+            logger.warning("order ledger unavailable: %s", type(error).__name__)
+            return []
+
+    def ingest_order(
+        self, order: OrderInput, source: str
+    ) -> tuple[OrderRecord, str]:
+        """Validate-and-store one order, idempotently. Returns (row, action)."""
+        return self.order_ledger.upsert(order, source)
+
+    def ledger_row_for(self, dispute_id: str) -> OrderRecord | None:
+        """The ledger row matching a dispute, keyed by the PayPal transaction."""
+        view = self.case_view(dispute_id)
+        facts = view.facts if view is not None else None
+        return match_for_facts(self.order_ledger, facts)
 
     def get_seller_input(self, dispute_id: str) -> SellerEvidenceInput | None:
         return self._seller_inputs.get(dispute_id)

@@ -1412,6 +1412,27 @@ details.payload-preview summary {
 .lab-call .chip { margin-left: 6px; }
 .lab-call .quoted-small { margin-top: 6px; white-space: pre-wrap; }
 
+/* == order ledger =================================================== */
+
+.alert-info { background: var(--surface-2); border-color: var(--line); color: var(--ink-soft); }
+.error-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.error-list li { font-family: var(--font-mono); font-size: 12.5px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+@media (max-width: 560px) { .field-row { grid-template-columns: 1fr; } }
+.form-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.card-head h2 { margin: 0; }
+.preview { margin-top: var(--sp-3); }
+.ledger-table { width: 100%; }
+.ledger-table td, .ledger-table th { white-space: nowrap; }
+.ledger-preview { font-size: 12.5px; }
+
+/* A row's source is one of the ORDER_SOURCES. Same shape as .origin, one
+   tone per source so the ledger table reads at a glance. */
+.origin-api, .origin-csv, .origin-manual, .origin-demo_seed {
+  background: var(--surface-2); color: var(--ink-soft); border-color: var(--line);
+}
+
 /* == reduced motion ================================================== */
 
 @media (prefers-reduced-motion: reduce) {

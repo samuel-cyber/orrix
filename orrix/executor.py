@@ -17,6 +17,7 @@ from .paypal_write import (
     PayPalWriteError,
     SandboxPayPalWriter,
 )
+from .orders import apply_matched
 from .policy import PROVIDE_EVIDENCE, CaseState, PolicyConfig, decide
 from .seller_input import SellerEvidenceInput
 
@@ -43,6 +44,7 @@ REASON_FETCH_FAILED = "fetch_failed"
 REASON_FACTS_FAILED = "facts_failed"
 REASON_EVIDENCE_NOT_RECORDED = "evidence_not_recorded"
 REASON_WRITE_FAILED = "write_failed"
+REASON_STALE_LEDGER = "stale_ledger"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executed_approvals (
@@ -114,6 +116,11 @@ class ExecutorDeps:
     #: tracking came from the seller rather than the PayPal record. Rebuilding
     #: Facts without it would change the payload and refuse the approval.
     seller_input: SellerEvidenceInput | None = None
+    #: The seller's ledger. When present, a matched row is overlaid onto the
+    #: freshly built Facts -- exactly as the approval endpoint did -- so the
+    #: payload rebuilds. When the approval names a row and version, that row
+    #: must still be at that version or the write is refused.
+    order_ledger: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +323,28 @@ def execute(approval: Approval, deps: ExecutorDeps) -> ExecutionResult:
             approval_id=approval.approval_id,
             requires_review=True,
         )
+
+    # The seller's ledger, overlaid exactly as the approval endpoint overlaid
+    # it. When the approval named a row and version, that row must still be
+    # present at that version: a moved or removed row refuses the write
+    # rather than silently authorising a different shipment.
+    matched_row = None
+    if deps.order_ledger is not None:
+        facts, matched_row = apply_matched(deps.order_ledger, facts)
+
+    if approval.ledger_row_id is not None:
+        if (
+            matched_row is None
+            or matched_row.row_id != approval.ledger_row_id
+            or matched_row.version != approval.ledger_row_version
+        ):
+            log("execute.refused:" + REASON_STALE_LEDGER, OriginTag.SYSTEM)
+            return ExecutionResult(
+                status=STATUS_REFUSED,
+                reason=REASON_STALE_LEDGER,
+                approval_id=approval.approval_id,
+                requires_review=True,
+            )
 
     case_state = CaseState(dispute_id=approval.dispute_id)
     decision = decide(facts, None, case_state, deps.policy_config)

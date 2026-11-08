@@ -26,6 +26,7 @@ from .audit import AuditLog, OriginTag, hash_payload
 from .claim_form import ClaimForm
 from .discrepancy import Discrepancy, FactReference, detect_discrepancy
 from .facts import Facts, FactsIntegrityError, build_facts
+from .orders import apply_matched
 from .policy import FLAG_AWAITING_BUYER, CaseState, PolicyConfig, PolicyDecision, decide
 from .reader import (
     REASON_NOT_CONFIGURED,
@@ -314,6 +315,11 @@ class PipelineDeps:
     policy_config: PolicyConfig = field(default_factory=PolicyConfig)
     reader_config: ReaderConfig | None = None
     reader_client: Any | None = None
+    #: The seller's order ledger. A matched row is overlaid onto Facts before
+    #: any decision, so the queue reflects the same evidence the approval
+    #: endpoint would send. It never adds a fact and never overwrites one the
+    #: PayPal record confirmed.
+    order_ledger: Any | None = None
 
 
 def _dispute_amount(facts: Facts | None) -> Decimal:
@@ -430,6 +436,8 @@ def sync_case(
         return _failed_view(
             dispute_id, update_time, "build_facts", error, seller_input, deps, policy_config
         )
+
+    facts, _ = apply_matched(deps.order_ledger, facts)
 
     try:
         discrepancy = detect_discrepancy(facts)
@@ -638,6 +646,11 @@ def process_case(
         )
         deps.case_views.save(view)
         return view
+
+    # The seller's ledger, overlaid before any decision or payload build. A
+    # matched row only fills an unavailable fact or records a conflict; it
+    # cannot add a fact or overwrite one the record confirmed.
+    facts, _ = apply_matched(deps.order_ledger, facts)
 
     audit.append(
         actor=ACTOR,
