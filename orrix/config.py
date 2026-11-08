@@ -39,6 +39,20 @@ class ConfigError(RuntimeError):
     """The configuration is unsafe to serve. Refuse to start."""
 
 
+def resolve_db_path() -> str:
+    """The one place the database path is decided.
+
+    ORRIX_DB is what render.yaml sets, pointing at the mounted disk.
+    ORRIX_DB_PATH stays supported for existing local setups.
+
+    Every component must resolve the path through here. orrix/store.py once
+    read ORRIX_DB_PATH only, so on Render -- which sets ORRIX_DB alone --
+    the poller wrote ./orrix.db while the console read /var/data/orrix.db.
+    The poll reported five disputes synced and the queue stayed empty.
+    """
+    return os.environ.get("ORRIX_DB") or os.environ.get("ORRIX_DB_PATH", DEFAULT_DB_PATH)
+
+
 def _flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -203,10 +217,7 @@ def load_config() -> AppConfig:
     session_secret = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
 
     return AppConfig(
-        # ORRIX_DB is what render.yaml sets, pointing at the mounted disk.
-        # ORRIX_DB_PATH stays supported for existing local setups.
-        db_path=os.environ.get("ORRIX_DB")
-        or os.environ.get("ORRIX_DB_PATH", DEFAULT_DB_PATH),
+        db_path=resolve_db_path(),
         paypal_client_id=os.environ.get("PAYPAL_CLIENT_ID"),
         paypal_client_secret=os.environ.get("PAYPAL_CLIENT_SECRET"),
         paypal_webhook_id=os.environ.get("PAYPAL_WEBHOOK_ID"),

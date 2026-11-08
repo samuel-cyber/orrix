@@ -308,6 +308,7 @@ def test_api_cases_carries_no_buyer_text(web):
         "flags",
         "orrix_status",
         "orrix_status_label",
+        "reader_pending",
         "allowed_actions",
         "detail",
     }
@@ -319,6 +320,7 @@ def test_api_cases_carries_no_buyer_text(web):
         "completeness",
         "evidence_submitted",
         "reasons",
+        "reader_pending",
         "case_url",
     }
     for fact in detail["facts"]:

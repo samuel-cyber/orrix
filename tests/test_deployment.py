@@ -57,7 +57,10 @@ def prod_config(tmp_path, **overrides):
     settings = {
         "environment": ENV_PRODUCTION,
         "admin_password": STRONG_PASSWORD,
-        "db_path": str(tmp_path / "prod.db"),
+        # The same file conftest points ORRIX_DB_PATH at. A deployment has
+        # one database: naming a different one here used to build a config
+        # the startup check now rejects, which is correct of it.
+        "db_path": str(tmp_path / "test.db"),
         "poller_enabled": False,
         "reader_api_key": None,
         "session_secret": "test-session-secret",

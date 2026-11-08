@@ -12,13 +12,17 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import store
-from .config import AppConfig, load_config
+from pathlib import Path
+
+from .config import AppConfig, ConfigError, load_config
+from .pipeline import PipelineDeps
 from .poller import run_poller
 from .web.app import STATIC_DIR, is_public
 from .web.app import router as web_router
 from .web.security import SECURITY_HEADERS, SESSION_COOKIE
 from .web.services import Services
 from .webhooks import router as webhook_router
+from .webhooks import set_sync_deps
 
 logger = logging.getLogger("orrix.main")
 
@@ -53,6 +57,30 @@ def create_app(
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
         store.init_db()
+
+        # The poller writes through orrix.store and the console reads
+        # through the config. If those ever disagree again, a poll would
+        # fill one database while the queue read another, so this fails
+        # loudly at boot rather than looking like an empty queue.
+        store_path = store.db_path()
+        if Path(store_path).resolve() != Path(config.db_path).resolve():
+            raise ConfigError(
+                "the store and the config disagree about the database: "
+                f"store={store_path} config={config.db_path}. Both must "
+                "resolve through orrix.config.resolve_db_path."
+            )
+
+        # The poller and the webhook index what they fetch through these.
+        # reader_config is None on purpose: syncing must never spend model
+        # credits, so the sync path has no model to call.
+        set_sync_deps(
+            PipelineDeps(
+                audit=services.audit,
+                case_views=services.case_views,
+                policy_config=config.policy_config(),
+                reader_config=None,
+            )
+        )
 
         # Presence and settings only. No value from the environment is ever
         # logged, so a startup log is safe to paste into an issue.

@@ -19,6 +19,40 @@ router = APIRouter()
 _DISPUTE_ID_FIELDS = ("dispute_id", "id", "disputeId")
 
 _client: SandboxPayPalClient | None = None
+_sync_deps: Any | None = None
+
+
+def set_sync_deps(deps: Any) -> None:
+    """Inject the PipelineDeps used when a synced dispute is indexed.
+
+    The app sets this at startup so the sync path shares the console's
+    audit log and database. Its reader_config is always None: a sync must
+    never be able to call the model, even by accident.
+    """
+    global _sync_deps
+    _sync_deps = deps
+
+
+def get_sync_deps() -> Any:
+    """Deps for indexing a synced dispute, built from the config if unset.
+
+    Falls back to building them so a poll driven outside the app (a test, a
+    one-off script) still indexes what it fetches.
+    """
+    global _sync_deps
+    if _sync_deps is None:
+        from .audit import AuditConfig, AuditLog
+        from .config import load_config
+        from .pipeline import CaseViewStore, PipelineDeps
+
+        config = load_config()
+        _sync_deps = PipelineDeps(
+            audit=AuditLog(config.audit_config()),
+            case_views=CaseViewStore(config.db_path),
+            policy_config=config.policy_config(),
+            reader_config=None,
+        )
+    return _sync_deps
 
 
 def get_client() -> SandboxPayPalClient:
@@ -100,12 +134,34 @@ def refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> bool
         return False
 
     store.save_case_snapshot(dispute_id, snapshot)
+
+    # Index it for the queue straight away. Storing the snapshot alone left
+    # the console with nothing to list, which is how a poll reporting five
+    # disputes produced an empty grid. This builds facts and a policy
+    # decision; it does not run the Reader.
+    try:
+        from .pipeline import sync_case
+
+        view = sync_case(snapshot, get_sync_deps())
+        indexed_status = view.status
+    except Exception as error:
+        # Never silent: the dispute is stored, so say loudly that the
+        # console will not see it until this is fixed.
+        logger.warning(
+            "indexing failed dispute_id=%s step=sync_case exception=%s message=%s",
+            dispute_id,
+            type(error).__name__,
+            error,
+        )
+        indexed_status = "index_failed"
+
     store.set_event_status(event_id, "processed")
     logger.info(
-        "event_id=%s event_type=%s dispute_id=%s status=processed",
+        "event_id=%s event_type=%s dispute_id=%s status=processed indexed=%s",
         event_id,
         event_type,
         dispute_id,
+        indexed_status,
     )
     return True
 

@@ -176,7 +176,9 @@ def test_the_harness_never_names_the_real_database():
 
 
 def test_no_test_module_names_the_real_database_except_this_guard():
-    allowed = {"test_no_real_db.py", "conftest.py"}
+    # test_empty_db_sync.py is about the path resolution itself, so it has
+    # to name the file; it only ever uses paths under tmp_path.
+    allowed = {"test_no_real_db.py", "conftest.py", "test_empty_db_sync.py"}
     offenders: list[str] = []
 
     for path in sorted((REPO_ROOT / "tests").rglob("*.py")):

@@ -121,12 +121,24 @@ class Services:
         return self._case_store
 
     def list_dispute_ids(self) -> list[str]:
+        """Dispute ids with a stored snapshot.
+
+        A failure here used to return [] in silence, which is how a
+        split-brain database looked like an empty queue. It now says what
+        went wrong and where it was looking.
+        """
         import sqlite3
 
         connection = sqlite3.connect(self.config.db_path, timeout=30)
         try:
             rows = connection.execute("SELECT dispute_id FROM cases ORDER BY dispute_id").fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as error:
+            logger.warning(
+                "could not read the cases table: %s: %s db_path=%s",
+                type(error).__name__,
+                error,
+                self.config.db_path,
+            )
             return []
         finally:
             connection.close()
@@ -141,13 +153,93 @@ class Services:
             row = connection.execute(
                 "SELECT snapshot_json FROM cases WHERE dispute_id = ?", (dispute_id,)
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as error:
+            logger.warning(
+                "could not read dispute_id=%s: %s: %s db_path=%s",
+                dispute_id,
+                type(error).__name__,
+                error,
+                self.config.db_path,
+            )
             return None
         finally:
             connection.close()
         if not row:
             return None
         return json.loads(row[0])
+
+    def sync_deps(self):
+        """Deps for indexing a dispute. Never carries a reader_config.
+
+        Listing the queue must cost nothing, so the sync path is given no
+        model to call rather than merely being asked not to call one.
+        """
+        from ..pipeline import PipelineDeps
+
+        return PipelineDeps(
+            audit=self.audit,
+            case_views=self.case_views,
+            policy_config=self.config.policy_config(),
+            reader_config=None,
+        )
+
+    def case_view(self, dispute_id: str):
+        """The persisted view for the queue, with no Reader call.
+
+        A dispute stored by an older build has no view row, so one is built
+        here from the stored snapshot. Still Reader-free: the model runs only
+        when the case itself is opened.
+        """
+        from ..pipeline import CaseView, sync_case
+
+        stored = self.case_views.get(dispute_id)
+        if stored is not None:
+            view = self.case_views.hydrate(stored)
+            if view is not None:
+                return view
+            logger.warning(
+                "stored case view for dispute_id=%s could not be read; rebuilding",
+                dispute_id,
+            )
+
+        snapshot = self.case_snapshot(dispute_id)
+        if snapshot is None:
+            logger.warning(
+                "no stored snapshot for dispute_id=%s; it cannot be listed", dispute_id
+            )
+            return None
+
+        return sync_case(
+            snapshot, self.sync_deps(), seller_input=self.get_seller_input(dispute_id)
+        )
+
+    def reindex(self, dispute_id: str):
+        """Rebuild the stored view after operator input, with no model call.
+
+        Needed because the queue is served from the stored view: without
+        this, saving seller tracking would leave the list showing the state
+        from before it was entered.
+
+        If the Reader has already run on this dispute version its result is
+        reused, so re-indexing never spends a credit either way.
+        """
+        from ..pipeline import process_case, sync_case
+
+        snapshot = self.case_snapshot(dispute_id)
+        if snapshot is None:
+            logger.warning("cannot reindex dispute_id=%s: no stored snapshot", dispute_id)
+            return None
+
+        seller_input = self.get_seller_input(dispute_id)
+        stored = self.case_views.get(dispute_id)
+        reader_already_ran = bool(stored) and not stored.get("reader_pending")
+
+        if reader_already_ran:
+            # reuse_reader keeps the cached result for this update_time.
+            return process_case(
+                snapshot, self.pipeline_deps, seller_input=seller_input
+            )
+        return sync_case(snapshot, self.sync_deps(), seller_input=seller_input)
 
     # -- operator working state -------------------------------------------
 

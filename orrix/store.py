@@ -29,8 +29,15 @@ CREATE TABLE IF NOT EXISTS cases (
 
 
 def db_path() -> str:
-    """Resolved at call time so tests and deployments can repoint it."""
-    return os.environ.get("ORRIX_DB_PATH", DEFAULT_DB_PATH)
+    """Resolved at call time, through the one resolver the config uses.
+
+    This module used to read ORRIX_DB_PATH on its own, which silently split
+    the deployment in two: the poller wrote one file and the console read
+    another. Delegating keeps a single answer.
+    """
+    from .config import resolve_db_path
+
+    return resolve_db_path()
 
 
 def _now() -> str:

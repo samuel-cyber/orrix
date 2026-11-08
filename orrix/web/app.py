@@ -320,6 +320,11 @@ def cases_page(request: Request) -> Response:
 def api_cases(request: Request) -> Response:
     """Queue data for the grid.
 
+    Reads the persisted case views. It does NOT run the Reader: listing the
+    queue must cost nothing, or every page load would spend model credits on
+    every dispute. A dispute with no view yet is indexed here, still without
+    the Reader, so a database written by an older build still lists.
+
     Carries no buyer text and no free text of any kind: every field is an
     identifier, a code, an amount or a derived label.
     """
@@ -327,11 +332,9 @@ def api_cases(request: Request) -> Response:
     rows = []
 
     for dispute_id in services.list_dispute_ids():
-        snapshot = services.case_snapshot(dispute_id)
-        if snapshot is None:
+        view = services.case_view(dispute_id)
+        if view is None:
             continue
-        seller_input = services.get_seller_input(dispute_id)
-        view = process_case(snapshot, services.pipeline_deps, seller_input=seller_input)
         facts = view.facts
         deadline = _deadline_info(facts.value("seller_response_due_date") if facts else None)
 
@@ -351,6 +354,7 @@ def api_cases(request: Request) -> Response:
                 "flags": ", ".join(sorted(view.decision.flags)),
                 "orrix_status": view.status,
                 "orrix_status_label": status_label(view.status),
+                "reader_pending": view.reader_pending,
                 "allowed_actions": ", ".join(sorted(view.decision.allowed_actions)),
                 # Master/detail payload. Facts are codes; the discrepancy is
                 # the module's fixed sentence. No buyer text anywhere.
@@ -364,6 +368,7 @@ def api_cases(request: Request) -> Response:
                     if facts
                     else False,
                     "reasons": list(view.decision.reasons),
+                    "reader_pending": view.reader_pending,
                     "case_url": f"/cases/{dispute_id}",
                 },
             }
@@ -439,6 +444,10 @@ def submit_seller_input(
         )
 
     services.set_seller_input(dispute_id, parsed)
+    # Rebuild the stored view so the queue reflects the new tracking. No
+    # model call: a cached Reader result is reused, or the case stays
+    # pending.
+    services.reindex(dispute_id)
     services.audit.append(
         actor="admin",
         action="web.seller_input_saved",
