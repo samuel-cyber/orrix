@@ -16,6 +16,7 @@ What an attacker would want, in rough order of how much damage losing it does.
 | PayPal API credentials | `.env` / the platform's secret store | the same, without touching Orrix at all |
 | The console session | `ADMIN_PASSWORD`, the session cookie | the approval button, so any permitted action |
 | The approval chain | `executed_approvals`, the `Approval` id | a replayed or retargeted write |
+| The order ledger | the `orders` table, the ingest token | a forged shipment assertion feeding an evidence payload, or a row edited under an approval |
 | The audit log | `audit_log`, `audit_head` | a history that no longer reflects what happened |
 | Dispute records | `cases`, `case_views` | buyer PII: names, emails, messages |
 | The audit HMAC key | the environment | the ability to forge a log that verifies |
@@ -26,7 +27,7 @@ What an attacker would want, in rough order of how much damage losing it does.
 | Zone | Contents | Allowed to reach |
 | --- | --- | --- |
 | Untrusted | buyer messages, buyer evidence notes, model output | the `ClaimForm` schema, and nothing else |
-| First-party, unverified | the seller's shipment form | Facts, as `seller_asserted` |
+| First-party, unverified | the seller's shipment form; seller order ledger rows (form, CSV, `/api/orders`) | Facts, as `seller_asserted` (`seller_ledger` origin for ledger rows) |
 | Trusted record | the PayPal `get_dispute` response | Facts, as `confirmed` |
 | Derived | Facts, discrepancy, policy decision | the console and an approval |
 | Authority | an `Approval` | the executor, once |
@@ -39,7 +40,8 @@ What an attacker would want, in rough order of how much damage losing it does.
 | `reader.py` | buyer text, the amount ceiling | nothing | reach PayPal, the store, or an approval |
 | `claim_form.py` | reader output | nothing | reach anything privileged |
 | `seller_input.py` | a submitted form | nothing | reach PayPal or the reader |
-| `facts.py` | the record, validated seller input | nothing | read buyer prose or model output |
+| `orders.py` | submitted ledger rows, the record's transaction id | the `orders` table | reach PayPal, the reader or an approval; invent a fact |
+| `facts.py` | the record, validated seller input, a matching ledger row | nothing | read buyer prose or model output |
 | `policy.py` | Facts, a reader result, case state | nothing | consult a model; emit a money-moving action |
 | `approval.py` | what a human approved | nothing | be reached from the reader path |
 | `executor.py` | the fresh record, an approval | **PayPal**, the audit log, the approval ledger | write without an intact, fresh, payload-matching approval |
@@ -52,6 +54,7 @@ What an attacker would want, in rough order of how much damage losing it does.
 | --- | --- | --- |
 | PayPal dispute record | trusted as a record of what PayPal holds | Facts, `status: confirmed` |
 | Seller shipment form | first-party, unverified | Facts, `status: seller_asserted` |
+| Seller order ledger row | first-party, unverified | Facts, `status: seller_asserted`, origin `seller_ledger` |
 | Buyer message and evidence notes | untrusted | the `ClaimForm` schema, nothing else |
 | Model output | untrusted | a validated `ClaimForm`, nothing else |
 
@@ -78,13 +81,25 @@ asserted delivery date. The note is a format string with no caller-supplied
 text.
 
 **Acting without authority.** Only an `Approval` authorises a write.
-`approval_id` is the hash of `(dispute_id, action, payload, dispute_version)`,
-so an approval cannot be retargeted, edited or re-dated. The reader and
-investigator cannot reach `create_approval`.
+`approval_id` is the hash of `(dispute_id, action, payload, dispute_version)`
+plus, when a ledger row was used, the row's id and version, so an approval
+cannot be retargeted, edited or re-dated. The reader and investigator cannot
+reach `create_approval`.
 
 **Acting on stale state.** The executor re-fetches, requires `update_time` and
-`status` to equal the approved version, re-runs policy against the fresh
-record, and requires the approved payload to equal what Facts produce now.
+`status` to equal the approved version, requires the ledger row to still stand
+at the approved id and version (`stale_ledger` otherwise), re-runs policy
+against the fresh record, and requires the approved payload to equal what
+Facts produce now.
+
+**A forged or edited order row.** The ledger is first-party but still untrusted
+text. A row is validated field by field (no free text, conservative patterns),
+`recorded_at` is server-set and never caller-supplied, and a row joins a
+dispute only by the PayPal-side `seller_transaction_id`, never one the row
+supplies. Overlaying a row fills only an unavailable fact, never adds one, and
+never overwrites a `confirmed` fact; a disagreement is `conflicting` and
+carries no value. The machine ingest is gated by its own bearer token
+(`LEDGER_API_KEY`, constant-time, rate-limited) and carries no session.
 
 **Acting twice.** The approval id is claimed in SQLite before the write and
 sent as `PayPal-Request-Id`.
@@ -154,15 +169,18 @@ code and checked by a test, not left to review.
    tools, no function calling, four fields, `extra="forbid"`.
 2. **The Reader can only ever block, never enable.** A reader result can
    empty `allowed_actions`; it can never add to it.
-3. **Only the record can confirm a fact.** Seller input is
-   `seller_asserted`; disagreement between sources is `conflicting` and
-   carries no value.
+3. **Only the record can confirm a fact.** Seller input and a matched ledger
+   row are `seller_asserted`; disagreement between sources is `conflicting`
+   and carries no value. A ledger row fills only an unavailable fact and adds
+   none.
 4. **Missing data is `unavailable`, never a negative fact.** An absent
    field never becomes `False` or `""`.
 5. **The action universe is `{provide_evidence}`.** No refund, accept-claim
    or make-offer path exists in this version.
 6. **Only an `Approval` authorises a write**, and its id is a hash of the
-   dispute, the action, the payload and the dispute version.
+   dispute, the action, the payload and the dispute version — plus a ledger
+   row's id and version when one was used, so a row edited under an approval
+   refuses the write.
 7. **The payload comes from Facts through a fixed template.** The executor
    refuses an approval whose payload differs from what Facts produce now.
 8. **One approval, one write.** The approval id is claimed before the call
@@ -179,6 +197,10 @@ code and checked by a test, not left to review.
 | The import boundary holds, including inside functions | `tests/test_boundaries.py` (ast) |
 | No module but the executor can write | `test_only_the_executor_imports_write_capability` |
 | Buyer text is read in exactly one place | `test_buyer_text_is_read_in_exactly_one_module` |
+| A ledger row fills only an unavailable fact and adds none | `tests/test_phase3_orders.py` |
+| A row edited after approval refuses the write | `test_a_row_edited_after_approval_refuses_the_write` |
+| A rejected ledger field is named, never echoed | `test_the_add_form_refuses_prose_with_a_400` |
+| Ingest is bearer-gated, constant-time, rate-limited | `test_phase3_orders.py` (API cases) |
 | Hostile text never reaches a payload, over the whole corpus | `tests/test_replay.py` |
 | No reader output can produce a write without an approval | `test_no_reader_output_can_produce_a_write_without_approval` |
 | A stale, tampered or retargeted approval is refused | `tests/test_invariants.py` |
@@ -215,9 +237,11 @@ Ordered by how much they should worry an operator.
    plainly. With a key, the key becomes the thing to steal, and a key stored
    beside the database buys little.
 5. **Unverified seller tracking.** A seller can assert any well-formed
-   tracking number and Orrix will submit it. It is marked `seller_asserted`
-   and a contradiction raises a review flag, but nothing contacts the
-   carrier. Orrix is relaying a claim on the seller's behalf.
+   tracking number — by hand, through a ledger CSV import, or through the
+   bearer-gated `POST /api/orders` ingest — and Orrix will submit it. It is
+   marked `seller_asserted` (`seller_ledger` when it came from the ledger) and
+   a contradiction raises a review flag, but nothing contacts the carrier.
+   Orrix is relaying a claim on the seller's behalf.
 6. **Session theft.** The cookie is `HttpOnly`, `SameSite=Lax` and `Secure`
    in production, and the CSP forbids inline script, but a stolen cookie is
    a logged-in operator until it expires. There is no re-authentication step
@@ -256,10 +280,18 @@ Ordered by how much they should worry an operator.
 ## Known limitations
 
 - **Seller assertions are not verified.** A seller can type any well-formed
-  tracking number. Orrix marks it `seller_asserted`, never `confirmed`, and a
-  discrepancy raises a review flag, but nothing checks the number with the
-  carrier. Treat `seller_asserted` facts as a claim Orrix is relaying on the
-  seller's behalf.
+  tracking number, by hand or through the ledger's form, CSV import or
+  `/api/orders` ingest. Orrix marks it `seller_asserted`, never `confirmed`,
+  and a discrepancy raises a review flag, but nothing checks the number with
+  the carrier. Treat `seller_asserted` facts as a claim Orrix is relaying on
+  the seller's behalf.
+- **A ledger row is not verified against the carrier either.** The ledger
+  holds the seller's own order data; its `recorded_at` is server-set and it can
+  only be matched by the PayPal-side transaction id, but its tracking number is
+  still the seller's assertion.
+- **The machine ingest token is a shared bearer.** `LEDGER_API_KEY` is one
+  value for the deployment, not a per-source credential and not scoped to a
+  single transaction. Rotating it means reissuing it to every ingest client.
 - **A discrepancy does not block submission.** By design: the seller is
   entitled to put their evidence in front of PayPal. The review flag is the
   only consequence.

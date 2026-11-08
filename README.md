@@ -53,6 +53,14 @@ and the approved payload still equals what Facts produce now. It claims the
 approval id before writing, so a replay cannot write twice, and it re-fetches
 afterwards because a 2xx alone is not proof.
 
+Before policy runs, Facts are overlaid from the seller's own **order ledger**
+(`orrix/orders.py`). A ledger row matches a dispute only by the PayPal-side
+`seller_transaction_id`, and it can only fill a fact that was `unavailable`,
+stamped `seller_ledger` / `seller_asserted`. It never adds a fact, never
+overwrites a `confirmed` one, and records a `conflicting` fact when a seller
+assertion disagrees with the record. See
+[The order ledger and the evidence pack](#the-order-ledger-and-the-evidence-pack).
+
 ### Which module may import what
 
 | Module | Job | May not import |
@@ -60,6 +68,8 @@ afterwards because a 2xx alone is not proof.
 | `claim_form.py` | the only schema buyer text may fill | paypal, executor, store, poller, webhooks |
 | `reader.py` | one model call, no tools | the same, plus `facts` |
 | `seller_input.py` | the only schema seller shipment data may fill | the same, plus reader |
+| `orders.py` | the seller's order ledger; matches a row to a dispute | paypal, paypal_write, executor, reader |
+| `demo_seed.py` | seeds a few ledger rows through the validated ingest | paypal, paypal_write, executor, reader |
 | `facts.py` | trusted facts from the record | reader, paypal_write, executor |
 | `discrepancy.py` | compares claim with delivery assertion | the same, plus reader |
 | `policy.py` | caps, clock, autonomy rules | reader, paypal_write, executor, any model client |
@@ -105,6 +115,70 @@ as an unauthorized action.
   keyed mode. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 - **No claim about model quality.** The evaluation measures a handful of
   author-written attacks at small N against one model at a time.
+
+## The order ledger and the evidence pack
+
+Every dispute Orrix can answer is about a specific shipment: which carrier,
+which tracking number, shipped and delivered when. Rather than retype that per
+dispute, the seller keeps an **order ledger** — one row an order — and Orrix
+matches the row to the dispute. The `/orders` page shows the ledger and
+supports three ways in:
+
+- **By hand** on `/orders` (a session, like every console page).
+- **CSV import** on the same page: paste rows, preview them, then commit.
+- **Machine ingest** at `POST /api/orders`, for a warehouse or ERP system.
+
+Each row carries `seller_transaction_id`, `order_ref`, `carrier`,
+`tracking_number`, `shipped_at`, `delivered_at`, `amount`, `currency` and an
+`item_label` (80 characters, no free text). There is **no free-text field**,
+every value is held to a conservative pattern, and a rejected row is reported
+as `field: reason` — never by repeating back what was typed. `recorded_at` is
+set by the server and can never be supplied by a caller. Changing any field
+bumps a monotonic row `version` and restamps `recorded_at`; submitting the
+same row again is a no-op.
+
+A row enters Facts only by matching a dispute's PayPal-side
+`seller_transaction_id`. Matching fills a fact that was `unavailable` and
+stamps it `seller_ledger` / `seller_asserted`; it never adds a fact and never
+overwrites a `confirmed` one. When a row's tracking number disagrees with the
+buyer's, the fact becomes `conflicting` and carries no value. Whether the row
+was written before the dispute was opened is computed in code
+(`recorded_before_dispute`), from the server-set `recorded_at` against the
+dispute's `create_time` — never from a caller-supplied date, and it fails
+closed when either side is missing.
+
+The case page shows the result as an **evidence checklist**: which facts the
+payload needs, whether each is confirmed, seller-asserted, conflicting or
+still missing, and where each came from.
+
+### The approval is bound to the row
+
+An approval built from a ledger row folds the row's **id and version** into
+the approval id, not just the values it contributed. If the row changes after
+the seller approves, the id no longer recomputes and the executor refuses the
+write with `stale_ledger`. A written value cannot be swapped underneath an
+approval.
+
+### Machine ingest
+
+`POST /api/orders` is the only public machine route besides the webhook and
+`/health`. It requires a bearer token in `LEDGER_API_KEY`, compared in
+**constant time** and rate-limited per minute (`LEDGER_MAX_PER_MINUTE`,
+default 60, answering `429` with `Retry-After`). **Unset, the endpoint is
+disabled** and the console's form and CSV import still work. The token is
+never logged and never appears in a response, and ingest cannot supply
+`recorded_at`. The route is public because a warehouse system holds no
+console session; its own token is the authentication.
+
+For a local demo, seed a few rows through the same validated ingest:
+
+```sh
+orrix-seed            # or: python -m orrix.demo_seed
+orrix-seed --db /tmp/demo.db
+```
+
+Seeded rows use the source `demo_seed`, so they are never mistaken for a real
+import, and re-running changes nothing.
 
 ## Running locally
 
@@ -286,11 +360,12 @@ secret is committed:
 | `PAYPAL_WEBHOOK_ID` | webhook signature verification |
 | `READER_API_KEY`, `READER_BASE_URL`, `READER_MODEL` | the Reader; omit and it is skipped |
 | `AUDIT_HMAC_KEY` | keying the audit chain |
+| `LEDGER_API_KEY` | bearer token for `POST /api/orders` machine ingest; unset disables it |
 | `AG_GRID_LICENSE_KEY` | optional; without it the grid shows a watermark |
 
 Set inline in the blueprint: `ORRIX_DB=/var/data/orrix.db`,
 `ORRIX_ENV=production`, `POLLER_ENABLED=true`,
-`POLL_INTERVAL_SECONDS=60`.
+`POLL_INTERVAL_SECONDS=60`, `LEDGER_MAX_PER_MINUTE=60`.
 
 With `ORRIX_ENV=production` the app marks cookies `Secure` and refuses to
 start without a long enough `ADMIN_PASSWORD`.
@@ -315,9 +390,10 @@ and makes the webhook an optimisation rather than a dependency.
 ## Known limitations
 
 - **Seller tracking is asserted, not verified.** A seller can type any
-  well-formed tracking number. Orrix marks it `seller_asserted`, never
-  `confirmed`, and raises a review flag when it contradicts the buyer — but
-  nothing checks the number with the carrier.
+  well-formed tracking number, by hand or through the ledger and its CSV/API
+  ingest. Orrix marks it `seller_asserted`, never `confirmed`, and raises a
+  review flag when it contradicts the buyer — but nothing checks the number
+  with the carrier.
 - **`delivered_date` may be ignored by PayPal.** It is included in the
   tracking entry because the evidence payload calls for a delivery date, but
   it is not a documented field on `provide-evidence`. PayPal may drop or

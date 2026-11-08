@@ -62,6 +62,8 @@ services:
         value: "true"
       - key: POLL_INTERVAL_SECONDS
         value: "60"
+      - key: LEDGER_MAX_PER_MINUTE
+        value: "60"
 
       # -- secrets: set every one of these in the Render dashboard ----
       # sync: false means Render will not read a value from this file and
@@ -101,6 +103,12 @@ services:
       # sitting beside the log it protects buys very little.
       # See docs/THREAT_MODEL.md.
       - key: AUDIT_HMAC_KEY
+        sync: false
+
+      # Auth token for machine ingest at POST /api/orders. Generate a long
+      # random value; leaving it unset disables the endpoint. Compared in
+      # constant time and rate-limited, and never logged or echoed.
+      - key: LEDGER_API_KEY
         sync: false
 
       # Optional AG Grid Enterprise licence. Without it the grid still
