@@ -213,6 +213,51 @@ class Services:
             snapshot, self.sync_deps(), seller_input=self.get_seller_input(dispute_id)
         )
 
+    def fetch_and_store(self, dispute_id: str) -> dict[str, Any] | None:
+        """Fetch one dispute from PayPal, store it, and index it.
+
+        Read-only against PayPal, and no Reader. Used when the console is
+        asked for a case it has no snapshot for, so a dispute the poller has
+        not reached yet still opens instead of reporting "No such case".
+        Returns None when PayPal does not have it.
+        """
+        from ..pipeline import sync_case
+
+        try:
+            snapshot = self.paypal_reader.get_dispute(dispute_id)
+        except Exception as error:
+            logger.warning(
+                "on-demand fetch failed dispute_id=%s step=get_dispute exception=%s "
+                "http_status=%s",
+                dispute_id,
+                type(error).__name__,
+                getattr(error, "status_code", None),
+            )
+            return None
+
+        if not isinstance(snapshot, dict) or snapshot.get("dispute_id") != dispute_id:
+            logger.warning(
+                "on-demand fetch returned a different dispute dispute_id=%s step=verify",
+                dispute_id,
+            )
+            return None
+
+        self._store().save_case_snapshot(dispute_id, snapshot)
+        try:
+            sync_case(
+                snapshot, self.sync_deps(), seller_input=self.get_seller_input(dispute_id)
+            )
+        except Exception as error:
+            logger.warning(
+                "on-demand index failed dispute_id=%s step=sync_case exception=%s "
+                "message=%s",
+                dispute_id,
+                type(error).__name__,
+                error,
+            )
+        logger.info("fetched dispute_id=%s on demand", dispute_id)
+        return snapshot
+
     def reindex(self, dispute_id: str):
         """Rebuild the stored view after operator input, with no model call.
 

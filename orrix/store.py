@@ -127,6 +127,15 @@ def get_case(dispute_id: str) -> dict[str, Any] | None:
         }
 
 
+def all_dispute_ids() -> list[str]:
+    """Every dispute with a stored snapshot, in a stable order."""
+    with closing(connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT dispute_id FROM cases ORDER BY dispute_id"
+        ).fetchall()
+    return [row["dispute_id"] for row in rows]
+
+
 def count_cases() -> int:
     with closing(connect()) as connection, connection:
         return connection.execute("SELECT COUNT(*) FROM cases").fetchone()[0]

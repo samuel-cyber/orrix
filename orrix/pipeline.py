@@ -481,6 +481,72 @@ def sync_case(
     return view
 
 
+def backfill_missing_views(
+    deps: PipelineDeps,
+    dispute_ids: Any,
+    load_snapshot: Any,
+) -> dict[str, int]:
+    """Build a case view for every stored snapshot that lacks one.
+
+    Runs once at startup, before the first poll. A snapshot with no view is
+    invisible to the console, and the poller alone would only notice it when
+    PayPal next reports a change -- which for a settled dispute may be
+    never. No Reader is called: deps carries no reader_config.
+    """
+    counts = {"checked": 0, "backfilled": 0, "failed": 0}
+
+    for dispute_id in dispute_ids:
+        counts["checked"] += 1
+        try:
+            if deps.case_views.get(dispute_id):
+                continue
+        except Exception as error:
+            logger.warning(
+                "backfill could not read the case view dispute_id=%s exception=%s "
+                "message=%s",
+                dispute_id,
+                type(error).__name__,
+                error,
+            )
+            counts["failed"] += 1
+            continue
+
+        snapshot = load_snapshot(dispute_id)
+        if not isinstance(snapshot, Mapping):
+            logger.warning(
+                "backfill found no usable snapshot dispute_id=%s step=load_snapshot",
+                dispute_id,
+            )
+            counts["failed"] += 1
+            continue
+
+        try:
+            sync_case(snapshot, deps)
+        except Exception as error:
+            logger.warning(
+                "backfill failed dispute_id=%s step=sync_case exception=%s message=%s",
+                dispute_id,
+                type(error).__name__,
+                error,
+            )
+            counts["failed"] += 1
+            continue
+
+        counts["backfilled"] += 1
+
+    if counts["backfilled"] or counts["failed"]:
+        logger.info(
+            "backfill complete checked=%s backfilled=%s failed=%s",
+            counts["checked"],
+            counts["backfilled"],
+            counts["failed"],
+        )
+    else:
+        logger.info("backfill complete checked=%s; every snapshot had a view",
+                    counts["checked"])
+    return counts
+
+
 def _cached_reader_result(
     deps: PipelineDeps, dispute_id: str, update_time: Any
 ) -> tuple[ReaderResult, str | None, str | None] | None:

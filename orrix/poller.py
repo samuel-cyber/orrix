@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from . import store
 from .paypal import PayPalError
-from .webhooks import get_client, refresh_case
+from .webhooks import get_client, get_sync_deps, refresh_case
 
 logger = logging.getLogger("orrix.poller")
 
@@ -65,6 +65,42 @@ def _stored_update_time(dispute_id: str) -> str | None:
     return _field(snapshot, _UPDATE_TIME_FIELDS)
 
 
+def _view_update_time(dispute_id: str, case_views: Any) -> str | None:
+    """update_time of the case view the console would list, if any."""
+    try:
+        row = case_views.get(dispute_id)
+    except Exception as error:
+        logger.warning(
+            "could not read the case view dispute_id=%s exception=%s message=%s",
+            dispute_id,
+            type(error).__name__,
+            error,
+        )
+        return None
+    if not row:
+        return None
+    stored = row.get("update_time")
+    return stored if isinstance(stored, str) and stored.strip() else None
+
+
+def _artifacts_current(dispute_id: str, update_time: str | None, case_views: Any) -> bool:
+    """Whether this dispute is fully represented at this version.
+
+    A poll may only skip when all three agree: the snapshot is stored at
+    this update_time AND the case view the console reads is built from the
+    same one. The event row is deliberately not part of this.
+
+    That event row is a claim marker, and a marker can outlive what it
+    stands for: after the database-path fix, poll events survived while the
+    snapshots and views they referred to did not. Treating the marker as
+    proof of work meant the poller skipped six disputes forever and the
+    queue showed one row.
+    """
+    if _stored_update_time(dispute_id) != update_time:
+        return False
+    return _view_update_time(dispute_id, case_views) == update_time
+
+
 def poll_once() -> dict[str, int]:
     """One polling pass. Returns counts; never raises on a PayPal failure.
 
@@ -72,7 +108,7 @@ def poll_once() -> dict[str, int]:
     decide whether to look closer, nothing more: the stored snapshot always
     comes from a fresh get_dispute, exactly as on the webhook path.
     """
-    counts = {"listed": 0, "processed": 0, "skipped": 0, "failed": 0}
+    counts = {"listed": 0, "processed": 0, "skipped": 0, "backfilled": 0, "failed": 0}
 
     try:
         disputes = get_client().list_disputes()
@@ -86,6 +122,7 @@ def poll_once() -> dict[str, int]:
         return counts
 
     counts["listed"] = len(disputes)
+    case_views = get_sync_deps().case_views
 
     for item in disputes:
         dispute_id = _field(item, ("dispute_id", "id"))
@@ -95,29 +132,36 @@ def poll_once() -> dict[str, int]:
 
         update_time = _field(item, _UPDATE_TIME_FIELDS)
 
-        # Already holding this exact version. This is what keeps a poll from
-        # redoing work a webhook just did for the same dispute.
-        stored = _stored_update_time(dispute_id)
-        if stored is not None and stored == update_time:
+        # Skip only when the snapshot and the case view both exist at this
+        # version. Anything less and there is work to do, whatever the
+        # events table says.
+        if _artifacts_current(dispute_id, update_time, case_views):
             counts["skipped"] += 1
             continue
 
         event_id = f"poll:{dispute_id}:{update_time}"
-        if not store.insert_event_if_absent(event_id, POLL_EVENT_TYPE, dispute_id):
-            # Same version already claimed, by an earlier pass or a racing one.
-            counts["skipped"] += 1
-            continue
+        # The event is claimed if new and reused if not, so a rebuild never
+        # writes a second row for the same version.
+        is_new = store.insert_event_if_absent(event_id, POLL_EVENT_TYPE, dispute_id)
+        if not is_new:
+            logger.info(
+                "poll rebuilding dispute_id=%s update_time=%s reason=%s",
+                dispute_id,
+                update_time,
+                "missing_or_stale_artifacts",
+            )
 
         if refresh_case(event_id, POLL_EVENT_TYPE, dispute_id):
-            counts["processed"] += 1
+            counts["processed" if is_new else "backfilled"] += 1
         else:
             counts["failed"] += 1
 
     logger.info(
-        "poll status=complete listed=%s processed=%s skipped=%s failed=%s",
+        "poll status=complete listed=%s processed=%s skipped=%s backfilled=%s failed=%s",
         counts["listed"],
         counts["processed"],
         counts["skipped"],
+        counts["backfilled"],
         counts["failed"],
     )
     return counts

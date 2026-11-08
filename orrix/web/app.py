@@ -144,6 +144,11 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
     services = _services(request)
     snapshot = services.case_snapshot(dispute_id)
     if snapshot is None:
+        # Not synced yet, or its artifacts went missing. Fetch it once,
+        # read-only, rather than telling the operator a real dispute does
+        # not exist. A PayPal 404 still falls through to "No such case".
+        snapshot = services.fetch_and_store(dispute_id)
+    if snapshot is None:
         return None
 
     seller_input = services.get_seller_input(dispute_id)

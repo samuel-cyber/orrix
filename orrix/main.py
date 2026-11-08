@@ -15,7 +15,7 @@ from . import store
 from pathlib import Path
 
 from .config import AppConfig, ConfigError, load_config
-from .pipeline import PipelineDeps
+from .pipeline import PipelineDeps, backfill_missing_views
 from .poller import run_poller
 from .web.app import STATIC_DIR, is_public
 from .web.app import router as web_router
@@ -73,14 +73,13 @@ def create_app(
         # The poller and the webhook index what they fetch through these.
         # reader_config is None on purpose: syncing must never spend model
         # credits, so the sync path has no model to call.
-        set_sync_deps(
-            PipelineDeps(
-                audit=services.audit,
-                case_views=services.case_views,
-                policy_config=config.policy_config(),
-                reader_config=None,
-            )
+        sync_deps = PipelineDeps(
+            audit=services.audit,
+            case_views=services.case_views,
+            policy_config=config.policy_config(),
+            reader_config=None,
         )
+        set_sync_deps(sync_deps)
 
         # Presence and settings only. No value from the environment is ever
         # logged, so a startup log is safe to paste into an issue.
@@ -102,6 +101,22 @@ def create_app(
             logger.info(
                 "ORRIX_ENV is not production; cookies are not marked Secure. Set "
                 "ORRIX_ENV=production when serving over HTTPS."
+            )
+
+        # A snapshot with no case view is invisible to the console. Rebuild
+        # any before the first poll, since the poller would otherwise only
+        # notice when PayPal next reports a change.
+        try:
+            backfill_missing_views(
+                sync_deps,
+                store.all_dispute_ids(),
+                lambda dispute_id: (store.get_case(dispute_id) or {}).get("snapshot"),
+            )
+        except Exception as error:
+            logger.warning(
+                "startup backfill failed exception=%s message=%s",
+                type(error).__name__,
+                error,
             )
 
         task: asyncio.Task | None = None
