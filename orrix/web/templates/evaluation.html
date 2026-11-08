@@ -45,6 +45,44 @@
 </div>
 {% endif %}
 
+<p class="section-note page-note">
+  Every figure below is an exact count from
+  <span class="mono">{{ results.results_path }}</span>. The full write-up,
+  with per-attack tables, is in
+  <a href="{{ site_repo_url }}/blob/main/docs/RESULTS.md">docs/RESULTS.md</a>.
+</p>
+
+<section class="card takeaways">
+  <h2>In plain words</h2>
+  <p class="section-note">
+    One sentence per system, taken from the recorded rows only. Numbers are
+    never pooled across systems or models.
+  </p>
+  <ul class="takeaway-list">
+    {% for t in results.system_takeaways %}
+    <li class="takeaway">
+      <div class="takeaway-head">
+        <span class="mono takeaway-system">{{ t.system }}</span>
+        <span class="chip {% if t.unauthorized %}chip-conflicting{% else %}chip-confirmed{% endif %}">
+          {{ t.unauthorized }} unauthorized
+        </span>
+      </div>
+      <p>{{ t.text }}</p>
+      {% if t.honest_unauthorized %}
+      <p class="takeaway-honest muted small">
+        {% if t.honest_unauthorized == 1 %}{{ t.honest_unauthorized }} of those
+        actions was{% else %}{{ t.honest_unauthorized }} of those actions
+        were{% endif %} on an honest dispute: a real customer's case the system
+        conceded. That is a different failure from being hijacked by an
+        attacker-controlled message, and it is labelled here rather than
+        folded into the attack total.
+      </p>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
 {% if results.labels %}
 <section class="card">
   <h2>Labels</h2>
@@ -170,11 +208,17 @@
 <section class="card caveats">
   <h2>Caveats</h2>
   <p class="section-note">From <span class="mono">docs/RESULTS.md</span>. Read these with the numbers.</p>
-  <ul>
-    {% for caveat in results.caveats %}
-    <li>{{ caveat }}</li>
-    {% endfor %}
-  </ul>
+  <details class="caveat-details" open>
+    <summary>
+      {{ results.caveats|length }} recorded
+      {{ "caveat" if results.caveats|length == 1 else "caveats" }}
+    </summary>
+    <ul>
+      {% for caveat in results.caveats %}
+      <li>{{ caveat }}</li>
+      {% endfor %}
+    </ul>
+  </details>
 </section>
 {% else %}
 <section class="card alert-warn caveats">

@@ -139,3 +139,21 @@ def all_dispute_ids() -> list[str]:
 def count_cases() -> int:
     with closing(connect()) as connection, connection:
         return connection.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+
+
+def latest_event_at(event_type: str | None = None) -> str | None:
+    """When the most recent event of a type arrived, or None if never.
+
+    The poller records one POLL.DISPUTE.SYNC event per dispute it refreshes.
+    The newest of those timestamps is what the console's "polled Ns ago"
+    indicator reads. It is a stored timestamp, never a live network call.
+    """
+    with closing(connect()) as connection, connection:
+        if event_type is None:
+            row = connection.execute("SELECT MAX(received_at) AS ts FROM events").fetchone()
+        else:
+            row = connection.execute(
+                "SELECT MAX(received_at) AS ts FROM events WHERE event_type = ?",
+                (event_type,),
+            ).fetchone()
+    return row["ts"] if row and row["ts"] else None

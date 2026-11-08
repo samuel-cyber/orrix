@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Attack Lab &middot; Orrix{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Attack Lab</h1>
+    <p class="muted">
+      Paste a hostile buyer message and compare a naive tool-calling agent
+      with Orrix. A dry run: fake tools only, no write to PayPal, one
+      configured model.
+    </p>
+  </div>
+</div>
+
+<section class="card">
+  <p class="section-note">
+    The interactive lab arrives in the next phase. It runs against a built-in
+    fake dispute, mirrors the dispute toolkit with fake tools, and stores its
+    runs in a separate table &mdash; never the hash-chained audit log.
+  </p>
+  <p class="muted">
+    Nothing here fabricates a result. Presets are author-written; outcomes
+    vary by model and are shown as they happen.
+  </p>
+  <p><a href="/cases" class="btn">Back to cases</a></p>
+</section>
+{% endblock %}

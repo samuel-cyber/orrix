@@ -125,6 +125,41 @@
 
   // -- columns -----------------------------------------------------------
 
+  // Status pills carry a glyph as well as a word, so the meaning survives
+  // without colour. The glyph is set with textContent like everything else.
+  var STATUS_ICON = {
+    action_available: "\u25B2",
+    evidence_submitted_waiting_for_buyer: "\u2713",
+    needs_human_review: "\u26A0",
+    awaiting_reader: "\u25CB",
+    no_action: "\u2014",
+    facts_failed: "\u2715"
+  };
+
+  var STATUS_PILL = {
+    action_available: "pill-action",
+    evidence_submitted_waiting_for_buyer: "pill-done",
+    needs_human_review: "pill-review",
+    awaiting_reader: "pill-wait",
+    no_action: "pill-none",
+    facts_failed: "pill-bad"
+  };
+
+  function statusPill(params) {
+    var data = params.data || {};
+    var span = document.createElement("span");
+    span.className = "status-pill " + (STATUS_PILL[data.orrix_status] || "pill-none");
+    var icon = document.createElement("span");
+    icon.className = "pill-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = STATUS_ICON[data.orrix_status] || "\u2022";
+    var label = document.createElement("span");
+    label.textContent = params.value == null ? "" : String(params.value);
+    span.appendChild(icon);
+    span.appendChild(label);
+    return span;
+  }
+
   function disputeLink(params) {
     if (!params.value) return document.createTextNode("");
     var link = document.createElement("a");
@@ -149,9 +184,8 @@
       headerName: "Amount",
       field: "amount",
       width: 130,
-      type: "numericColumn",
-      cellClass: "mono",
       filter: "agNumberColumnFilter",
+      cellClass: "mono amount-cell",
       valueFormatter: function (p) {
         if (!p.value) return "";
         return p.value + " " + ((p.data && p.data.currency) || "");
@@ -190,10 +224,9 @@
     {
       headerName: "Orrix status",
       field: "orrix_status_label",
-      minWidth: 240,
+      minWidth: 250,
       filter: "agSetColumnFilter",
-      rowGroup: true,
-      hide: true
+      cellRenderer: statusPill
     }
   ];
 
@@ -214,15 +247,10 @@
         enableRowGroup: true,
         enableValue: true
       },
-      autoGroupColumnDef: {
-        headerName: "Orrix status",
-        minWidth: 300,
-        cellRendererParams: { suppressCount: false }
-      },
-      groupDefaultExpanded: 1,
       masterDetail: true,
       detailCellRenderer: DetailRenderer,
       detailRowAutoHeight: true,
+      rowHeight: 46,
       sideBar: {
         toolPanels: ["columns", "filters"],
         defaultToolPanel: null
@@ -237,6 +265,11 @@
       },
       rowSelection: "single",
       tooltipShowDelay: 300,
+      onRowClicked: function (event) {
+        if (event.event && event.event.defaultPrevented) return;
+        var url = event.data && event.data.detail && event.data.detail.case_url;
+        if (url) window.location.assign(url);
+      },
       onGridReady: function (event) {
         OrrixGrid.restoreColumnState(event.api, STORAGE_KEY);
       }
@@ -257,6 +290,22 @@
         api.setGridOption("quickFilterText", quickFilter.value);
       });
     }
+
+    // Quick-filter chips: each one drops a fixed phrase into the quick
+    // filter, so they are a shortcut over the same mechanism, not a second
+    // one that could disagree with it.
+    var chips = document.querySelectorAll("[data-case-filter]");
+    Array.prototype.forEach.call(chips, function (chipButton) {
+      chipButton.addEventListener("click", function () {
+        Array.prototype.forEach.call(chips, function (other) {
+          other.classList.toggle("active", other === chipButton);
+        });
+        var value = chipButton.getAttribute("data-case-filter") || "";
+        if (quickFilter) quickFilter.value = value;
+        api.setGridOption("quickFilterText", value);
+      });
+    });
+    if (chips.length) chips[0].classList.add("active");
 
     var reset = document.getElementById("cases-reset-columns");
     if (reset) {

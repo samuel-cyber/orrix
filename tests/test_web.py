@@ -96,7 +96,8 @@ SELLER_FORM = {
 }
 
 # Routes that must all redirect an anonymous visitor to the login page.
-PROTECTED_PAGES = ("/", "/cases", f"/cases/{FIXTURE_DISPUTE_ID}", "/audit")
+# "/" is NOT here: it is the public landing page.
+PROTECTED_PAGES = ("/cases", f"/cases/{FIXTURE_DISPUTE_ID}", "/audit")
 PROTECTED_APIS = ("/api/cases", "/api/audit")
 PROTECTED_POSTS = (
     "/logout",

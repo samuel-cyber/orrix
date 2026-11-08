@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Overview &middot; Orrix{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Overview</h1>
+    <p class="muted">
+      What needs a seller today, from the stored case views and the audit log.
+      Opening this page runs no Reader and makes no PayPal call.
+    </p>
+  </div>
+</div>
+
+<div class="stat-row">
+  <article class="stat-tile">
+    <span class="stat-label">Open disputes</span>
+    <span class="stat-value" data-count-to="{{ tiles.open }}">{{ tiles.open }}</span>
+    <span class="stat-sub">with a stored snapshot</span>
+  </article>
+  <article class="stat-tile {% if tiles.awaiting_approval %}is-urgent{% endif %}">
+    <span class="stat-label">Awaiting approval</span>
+    <span class="stat-value" data-count-to="{{ tiles.awaiting_approval }}">{{ tiles.awaiting_approval }}</span>
+    <span class="stat-sub">evidence ready to send</span>
+  </article>
+  <article class="stat-tile">
+    <span class="stat-label">Money at risk</span>
+    <span class="stat-value">{{ tiles.at_risk }}</span>
+    <span class="stat-sub">{{ tiles.currency or 'currency unknown' }}</span>
+  </article>
+  <article class="stat-tile {% if tiles.next_deadline_id %}is-urgent{% endif %}">
+    <span class="stat-label">Next deadline</span>
+    <span class="stat-value">{{ tiles.next_deadline }}</span>
+    {% if tiles.next_deadline_id %}
+    <span class="stat-sub"><a class="mono" href="/cases/{{ tiles.next_deadline_id }}">{{ tiles.next_deadline_id }}</a></span>
+    {% else %}
+    <span class="stat-sub">nothing on the clock</span>
+    {% endif %}
+  </article>
+</div>
+
+<div class="columns">
+  <section class="card">
+    <h2>Needs you</h2>
+    {% if needs_you %}
+    <ul class="needs-you">
+      {% for case in needs_you %}
+      <li>
+        <svg class="deadline-ring {{ case.ring }}" viewBox="0 0 40 40" aria-hidden="true">
+          <circle class="ring-track" cx="20" cy="20" r="16"></circle>
+          <circle class="ring-value" cx="20" cy="20" r="16"
+                  stroke-dasharray="{{ case.ring_arc }} 100.53"></circle>
+        </svg>
+        <div class="ny-main">
+          <a class="ny-id" href="/cases/{{ case.dispute_id }}">{{ case.dispute_id }}</a>
+          <div class="ny-meta">
+            {{ case.why }} &middot; {{ case.deadline.label }}
+            {% if case.reason %}&middot; {{ case.reason }}{% endif %}
+          </div>
+        </div>
+        <div class="ny-value mono">{{ case.amount }} {{ case.currency }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted empty-note">
+      Nothing is urgent right now. New disputes land here as webhooks and the
+      polling fallback pick them up.
+    </p>
+    {% endif %}
+  </section>
+
+  <div class="side">
+    <section class="card">
+      <h2>Disputes by reason</h2>
+      {% if reason_bars %}
+      <div class="mini-chart">
+        {% for bar in reason_bars %}
+        <div class="mini-bar">
+          <span class="mini-bar-label">{{ bar.label }}</span>
+          <span class="mini-bar-track"><span class="mini-bar-fill" data-fill="{{ bar.pct }}"></span></span>
+          <span class="mini-bar-value">{{ bar.value }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="muted small">No reasons recorded yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Exposure by due week</h2>
+      {% if week_bars %}
+      <div class="mini-chart">
+        {% for bar in week_bars %}
+        <div class="mini-bar">
+          <span class="mini-bar-label">{{ bar.label }}</span>
+          <span class="mini-bar-track"><span class="mini-bar-fill" data-fill="{{ bar.pct }}"></span></span>
+          <span class="mini-bar-value">{{ bar.value }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="muted small">No deadlines to plot yet.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+
+<section class="card">
+  <h2>Activity</h2>
+  {% if feed %}
+  <ul class="feed">
+    {% for item in feed %}
+    <li>
+      <span class="feed-when">{{ item.ts or '—' }}</span>
+      <span class="feed-what">
+        <span class="feed-action">{{ item.action }}</span>
+        <span class="muted small">
+          {{ item.actor }}
+          {% if item.dispute_id %}&middot; <a class="mono" href="/cases/{{ item.dispute_id }}">{{ item.dispute_id }}</a>{% endif %}
+          &middot; {{ item.origin }}
+        </span>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted empty-note">No activity recorded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

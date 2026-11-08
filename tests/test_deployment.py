@@ -262,14 +262,18 @@ def test_headers_are_present_on_a_redirect_and_an_error(client):
 # -- the public surface ------------------------------------------------
 
 
-def test_only_health_login_webhook_and_static_are_public():
+def test_only_the_root_health_login_webhook_and_static_are_public():
     """The unauthenticated surface, pinned.
 
     /static is public because the login page needs its stylesheet. It serves
     only CSS and JS files, which carry no data: tests/test_boundaries.py
     enforces that no asset is built from data and no template inlines any.
+    The bare "/" is public because it is the landing page, which reads only
+    the on-disk evaluation summary, never dispute data. is_public("/x") is
+    False: the allowlist entry is the exact root only, so no deeper route
+    is exposed by it.
     """
-    assert set(PUBLIC_PATHS) == {"/health", "/login", "/webhooks/paypal", "/static"}
+    assert set(PUBLIC_PATHS) == {"/", "/health", "/login", "/webhooks/paypal", "/static"}
 
 
 def test_static_serves_only_assets_with_no_data(client):
@@ -285,7 +289,7 @@ def test_static_serves_only_assets_with_no_data(client):
 
 @pytest.mark.parametrize(
     "path",
-    ["/", "/cases", "/audit", "/evaluation", "/api/cases", "/api/audit", "/api/evaluation"],
+    ["/cases", "/audit", "/evaluation", "/api/cases", "/api/audit", "/api/evaluation"],
 )
 def test_every_other_route_needs_a_session(client, path):
     response = client.get(path)

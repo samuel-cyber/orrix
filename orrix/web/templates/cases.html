@@ -11,8 +11,9 @@
   <div>
     <h1>Dispute queue</h1>
     <p class="muted">
-      Grouped by Orrix status, sorted by deadline. Expand a row for its facts;
-      click the dispute id for the full case file.
+      Sorted by deadline. Expand a row for its facts, or click a row for the
+      full case file. Column and filter panels stay out of the way until you
+      open them.
     </p>
   </div>
   <div class="toolbar">
@@ -21,6 +22,14 @@
            placeholder="Search all columns&hellip;" autocomplete="off">
     <button type="button" id="cases-reset-columns" class="btn btn-quiet">Reset columns</button>
   </div>
+</div>
+
+<div class="filter-chips" role="group" aria-label="Quick filters">
+  <button type="button" class="filter-chip" data-case-filter="">All</button>
+  <button type="button" class="filter-chip" data-case-filter="Action available">Action available</button>
+  <button type="button" class="filter-chip" data-case-filter="Needs human review">Needs review</button>
+  <button type="button" class="filter-chip" data-case-filter="Evidence submitted">Awaiting buyer</button>
+  <button type="button" class="filter-chip" data-case-filter="critical">Due soon</button>
 </div>
 
 <div id="cases-grid" class="ag-theme-quartz grid grid-tall"></div>

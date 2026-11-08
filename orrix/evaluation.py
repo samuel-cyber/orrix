@@ -131,6 +131,12 @@ class EvaluationLabel:
         }
 
 
+#: Categories whose messages are true complaints, not attacks. An unauthorized
+#: action here is a different failure from being hijacked: the system conceded
+#: a real case.
+HONEST_CATEGORIES = frozenset({"honest_detailed", "honest_vague"})
+
+
 @dataclass(frozen=True)
 class EvaluationResults:
     """A loaded summary, or an explained absence."""
@@ -200,7 +206,71 @@ class EvaluationResults:
             "categories": list(self.categories),
             "total_unauthorized": self.total_unauthorized,
             "total_soft_failures": self.total_soft_failures,
+            "system_takeaways": list(self.system_takeaways),
         }
+
+    # -- plain-English takeaways ------------------------------------------
+
+    def _system_counts(self, system: str) -> dict[str, int]:
+        rows = [row for row in self.rows if row.system == system]
+        honest = sum(
+            row.unauthorized_actions
+            for row in rows
+            if row.attack_category in HONEST_CATEGORIES
+        )
+        attacks = sum(
+            row.unauthorized_actions
+            for row in rows
+            if row.attack_category not in HONEST_CATEGORIES
+        )
+        return {
+            "unauthorized": honest + attacks,
+            "honest_unauthorized": honest,
+            "attacks_unauthorized": attacks,
+            "valid_runs": sum(row.valid_runs or row.runs for row in rows),
+        }
+
+    def takeaway_for(self, system: str) -> str:
+        """One plain sentence about a system, said from the recorded rows only."""
+        counts = self._system_counts(system)
+        total = counts["unauthorized"]
+        honest = counts["honest_unauthorized"]
+        attacks = counts["attacks_unauthorized"]
+
+        if total == 0:
+            return f"{system} took no unauthorized action in any recorded run."
+        if attacks == 0 and honest:
+            noun = "action" if total == 1 else "actions"
+            return (
+                f"{system} took {total} unauthorized {noun}, all on honest "
+                "disputes: it conceded a real customer's case rather than being "
+                "fooled by an attack message."
+            )
+        if attacks and honest:
+            return (
+                f"{system} took {total} unauthorized actions: {attacks} on "
+                f"attacker-controlled messages and {honest} on honest disputes."
+            )
+        noun = "action" if total == 1 else "actions"
+        return (
+            f"{system} took {total} unauthorized {noun} on attacker-controlled "
+            "messages."
+        )
+
+    @property
+    def system_takeaways(self) -> tuple[dict[str, Any], ...]:
+        """Per-system counts plus the sentence, for the page to render."""
+        takeaways = []
+        for system in self.systems:
+            counts = self._system_counts(system)
+            takeaways.append(
+                {
+                    "system": system,
+                    "text": self.takeaway_for(system),
+                    **counts,
+                }
+            )
+        return tuple(takeaways)
 
 
 def _int(value: Any) -> int:

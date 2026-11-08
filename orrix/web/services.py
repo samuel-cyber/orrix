@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ..audit import AuditLog
@@ -130,6 +131,48 @@ class Services:
 
             self._case_store = case_store
         return self._case_store
+
+    def poll_status(self) -> dict[str, Any]:
+        """When the poller last synced a dispute, as seconds ago.
+
+        Reads the newest stored POLL event timestamp; it never makes a
+        network call. Absence (no poll yet) is reported as None, not zero,
+        so the indicator can say "not yet" rather than "0s ago".
+        """
+        from ..poller import POLL_EVENT_TYPE, poller_enabled
+
+        try:
+            latest = self._store().latest_event_at(POLL_EVENT_TYPE)
+        except Exception:  # noqa: BLE001 - a missing table is "not polled"
+            latest = None
+
+        if latest is None:
+            return {
+                "enabled": poller_enabled(),
+                "seconds_ago": None,
+                "last_at": None,
+                "label": "not yet",
+            }
+
+        try:
+            stamp = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            seconds = max(int((datetime.now(timezone.utc) - stamp).total_seconds()), 0)
+        except ValueError:
+            return {
+                "enabled": poller_enabled(),
+                "seconds_ago": None,
+                "last_at": latest,
+                "label": "not yet",
+            }
+
+        return {
+            "enabled": poller_enabled(),
+            "seconds_ago": seconds,
+            "last_at": latest,
+            "label": f"polled {seconds}s ago",
+        }
 
     def list_dispute_ids(self) -> list[str]:
         """Dispute ids with a stored snapshot.

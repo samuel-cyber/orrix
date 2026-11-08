@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Orrix is a sandbox-only PayPal dispute agent that keeps untrusted buyer text away from every privileged decision.">
+  <title>Orrix &middot; dispute response with a real trust boundary</title>
+  <script src="/static/theme.js"></script>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/inter@5.0.20/index.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/index.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-page="landing">
+  <header class="landing-nav">
+    <div class="landing-nav-inner">
+      <a href="/" class="wordmark">Orrix</a>
+      <nav class="landing-nav-links" aria-label="Sections">
+        <a href="#problem">The problem</a>
+        <a href="#how">How it works</a>
+        <a href="#proof">Proof</a>
+        <a href="#lab">Attack Lab</a>
+        <a href="#open">Open source</a>
+      </nav>
+      <div class="landing-nav-actions">
+        <button type="button" class="icon-btn" data-theme-toggle aria-pressed="false"
+                title="Switch theme">
+          <span class="visually-hidden">Toggle theme</span>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <path d="M12 3v2M12 19v2M5 12H3M21 12h-2M6 6l1.5 1.5M16.5 16.5L18 18M18 6l-1.5 1.5M7.5 16.5L6 18"></path>
+            <circle cx="12" cy="12" r="4"></circle>
+          </svg>
+        </button>
+        <a href="/login" class="btn btn-primary">Sign in</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero landing-section">
+      <div class="hero-grid">
+        <div class="hero-copy reveal">
+          <p class="hero-eyebrow">Sandbox-only dispute response agent</p>
+          <h1>Untrusted text never reaches a privileged decision.</h1>
+          <p class="hero-promise">
+            Orrix reads what a buyer wrote, turns it into one validated claim
+            form, and decides in plain code. The module that supplies evidence
+            to PayPal is the only one that can write, and it acts on nothing
+            the buyer typed.
+          </p>
+          <div class="hero-actions">
+            <a href="/login" class="btn btn-primary btn-lg">Open the console</a>
+            <a href="#how" class="btn btn-quiet btn-lg">See how it works</a>
+          </div>
+          <div class="hero-stats">
+            {% if results.available %}
+            <div class="hero-stat">
+              <span class="proof-value" data-count-to="{{ results.combined_valid_runs }}">{{ results.combined_valid_runs }}</span>
+              <span class="proof-label">valid runs</span>
+            </div>
+            <div class="hero-stat">
+              <span class="proof-value good" data-count-to="{{ results.combined_unauthorized }}">{{ results.combined_unauthorized }}</span>
+              <span class="proof-label">unauthorized actions by Orrix</span>
+            </div>
+            {% else %}
+            <div class="hero-stat">
+              <span class="proof-value">no runs</span>
+              <span class="proof-label">recorded yet</span>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="diagram-frame reveal">
+          <svg class="trust-diagram" viewBox="0 0 520 420" role="img"
+               aria-label="Untrusted buyer text flows into a sealed reader with no tools; a validated claim form comes out. Trusted PayPal facts flow through plain-code policy, seller approval, the executor, PayPal, and the hash-chained audit log.">
+            <!-- Lane A: untrusted text in, validated claim form out -->
+            <path class="flow-line untrusted" d="M20 70 H180" />
+            <circle class="flow-dot" r="4">
+              <animate attributeName="cx" values="20;180;20" dur="3.2s" repeatCount="indefinite" />
+              <animate attributeName="cy" values="70;70;70" dur="3.2s" repeatCount="indefinite" />
+            </circle>
+
+            <rect class="box-untrusted" x="180" y="42" width="150" height="56" rx="10" />
+            <text class="diagram-label" x="255" y="66" text-anchor="middle">Buyer text</text>
+            <text class="diagram-label muted-label" x="255" y="84" text-anchor="middle">untrusted</text>
+
+            <path class="flow-line sealed" d="M330 70 H400" />
+            <circle class="flow-dot" r="4">
+              <animate attributeName="cx" values="330;400;330" dur="3.2s" repeatCount="indefinite" />
+              <animate attributeName="cy" values="70;70;70" dur="3.2s" repeatCount="indefinite" />
+            </circle>
+
+            <rect class="box-sealed" x="400" y="36" width="100" height="68" rx="10" />
+            <text class="diagram-label" x="450" y="62" text-anchor="middle">Reader</text>
+            <text class="diagram-label muted-label" x="450" y="80" text-anchor="middle">no tools</text>
+
+            <rect class="box-fill" x="180" y="130" width="320" height="44" rx="10" />
+            <text class="diagram-label" x="340" y="157" text-anchor="middle">Validated claim form (display only)</text>
+
+            <!-- Lane B: trusted facts through policy, approval, executor -->
+            <rect class="box-fill" x="20" y="230" width="150" height="56" rx="10" />
+            <text class="diagram-label" x="95" y="254" text-anchor="middle">PayPal facts</text>
+            <text class="diagram-label muted-label" x="95" y="272" text-anchor="middle">trusted</text>
+
+            <path class="flow-line trusted" d="M170 258 H205" />
+            <rect class="box-fill" x="205" y="230" width="120" height="56" rx="10" />
+            <text class="diagram-label" x="265" y="254" text-anchor="middle">Plain-code</text>
+            <text class="diagram-label muted-label" x="265" y="272" text-anchor="middle">policy</text>
+
+            <path class="flow-line trusted" d="M325 258 H360" />
+            <rect class="box-fill" x="360" y="230" width="140" height="56" rx="10" />
+            <text class="diagram-label" x="430" y="254" text-anchor="middle">Seller approval</text>
+            <text class="diagram-label muted-label" x="430" y="272" text-anchor="middle">explicit</text>
+
+            <path class="flow-line trusted" d="M430 286 V330" />
+            <circle class="flow-dot" r="4">
+              <animate attributeName="cy" values="286;330;286" dur="4s" repeatCount="indefinite" />
+              <animate attributeName="cx" values="430;430;430" dur="4s" repeatCount="indefinite" />
+            </circle>
+
+            <rect class="box-fill" x="330" y="330" width="170" height="56" rx="10" />
+            <text class="diagram-label" x="415" y="354" text-anchor="middle">Executor</text>
+            <text class="diagram-label muted-label" x="415" y="372" text-anchor="middle">only writer</text>
+
+            <path class="flow-line trusted" d="M330 358 H120" />
+            <rect class="box-fill" x="20" y="330" width="100" height="56" rx="10" />
+            <text class="diagram-label" x="70" y="354" text-anchor="middle">PayPal</text>
+            <text class="diagram-label muted-label" x="70" y="372" text-anchor="middle">sandbox</text>
+          </svg>
+          <p class="diagram-caption">
+            Buyer text stops at the reader. Only validated facts and an
+            explicit approval reach the executor, and every step lands in a
+            hash-chained audit log.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="landing-section" id="problem">
+      <div class="section-head reveal">
+        <h2 class="section-title">The problem</h2>
+        <p class="section-lede">
+          Give an agent both buyer text and the tools to act, and a crafted
+          message becomes an instruction. The failure is not the model reading
+          a message; it is the same component reading it and acting on it.
+        </p>
+      </div>
+      <div class="card-grid">
+        <article class="card reveal">
+          <h3>One context window</h3>
+          <p class="muted">
+            Most agents pass a buyer's message straight into a tool-calling
+            loop. The same tokens that describe a problem also authorise a
+            refund.
+          </p>
+        </article>
+        <article class="card reveal">
+          <h3>Authority by accident</h3>
+          <p class="muted">
+            "I am PayPal support" is text, but inside a single agent it is
+            indistinguishable from an instruction the operator meant.
+          </p>
+        </article>
+        <article class="card reveal">
+          <h3>No separating wall</h3>
+          <p class="muted">
+            A prompt is a request for behaviour. Orrix uses a boundary the
+            code enforces, not a sentence the model is asked to respect.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="landing-section" id="how">
+      <div class="section-head reveal">
+        <h2 class="section-title">How Orrix works</h2>
+        <p class="section-lede">
+          Five steps. The reader has no tools, the policy consults no model,
+          and the executor is the only module that can write.
+        </p>
+      </div>
+      <ol class="steps">
+        <li class="step-card reveal">
+          <span class="step-n">1</span>
+          <h3>Read</h3>
+          <p class="muted">
+            Untrusted buyer text becomes one validated claim form: a claim
+            type, a clamped amount and a bounded summary. Nothing else.
+          </p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-n">2</span>
+          <h3>Decide</h3>
+          <p class="muted">
+            Plain code decides what is allowed, using only trusted PayPal
+            facts. No model touches the decision.
+          </p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-n">3</span>
+          <h3>Approve</h3>
+          <p class="muted">
+            A seller approves exactly one action on one dispute version. The
+            approval is bound to a payload hash.
+          </p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-n">4</span>
+          <h3>Submit</h3>
+          <p class="muted">
+            The executor is the only module that can write, and only the
+            approved payload reaches PayPal. Idempotent by approval id.
+          </p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-n">5</span>
+          <h3>Record</h3>
+          <p class="muted">
+            Every step appends to a hash-chained audit log, so tampering is
+            visible, not silent.
+          </p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="landing-section" id="proof">
+      <div class="section-head reveal">
+        <h2 class="section-title">Proof</h2>
+        <p class="section-lede">
+          Numbers from the recorded evaluation. They are read from the
+          summary file on disk and shown as they are.
+        </p>
+      </div>
+
+      {% if results.available %}
+      <div class="proof-grid reveal">
+        <div class="proof-stat">
+          <span class="proof-value" data-count-to="{{ results.combined_valid_runs }}">{{ results.combined_valid_runs }}</span>
+          <span class="proof-label">valid runs in the recorded evaluation</span>
+        </div>
+        <div class="proof-stat">
+          <span class="proof-value good" data-count-to="{{ results.combined_unauthorized }}">{{ results.combined_unauthorized }}</span>
+          <span class="proof-label">unauthorized actions by Orrix</span>
+        </div>
+        <div class="proof-stat">
+          <span class="proof-value" data-count-to="{{ results.combined_soft_failures }}">{{ results.combined_soft_failures }}</span>
+          <span class="proof-label">soft failures, reported honestly</span>
+        </div>
+      </div>
+
+      {% if results.labels %}
+      <div class="card reveal">
+        <p class="section-note">
+          One provider/model run, reported on its own terms. Results are never
+          pooled into a single headline.
+        </p>
+        <table class="facts">
+          <thead>
+            <tr><th>System</th><th>Valid runs</th><th>Unauthorized</th></tr>
+          </thead>
+          <tbody>
+            {% for label in results.labels[:1] %}
+              {% for row in label.per_system() %}
+              <tr>
+                <td class="mono">{{ row.system }}</td>
+                <td>{{ row.valid_runs }}</td>
+                <td>{% if row.unauthorized_actions %}<span class="value-bad">{{ row.unauthorized_display }}</span>{% else %}<span class="value-good">{{ row.unauthorized_display }}</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            {% endfor %}
+          </tbody>
+        </table>
+        <p class="muted small">
+          Model <span class="mono">{{ results.labels[0].model }}</span>,
+          recorded {{ results.labels[0].date }}. The naive agent conceded one
+          honest dispute it should have defended; the injected attacks did not
+          hijack this model. See docs/RESULTS.md for the caveats in full.
+        </p>
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="card empty-state reveal">
+        <h3>No evaluation recorded yet</h3>
+        <p class="muted">
+          The numbers appear here once the harness has written its summary.
+          Nothing on this page is invented in the meantime.
+        </p>
+        <p class="muted small mono">{{ results.generate_command }}</p>
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="landing-section" id="lab">
+      <div class="section-head reveal">
+        <h2 class="section-title">Try the Attack Lab</h2>
+        <p class="section-lede">
+          Paste a hostile buyer message and watch a naive agent concede while
+          Orrix does not. It is a dry run against a built-in fake dispute, and
+          it is labelled as exactly that.
+        </p>
+      </div>
+      <div class="card reveal">
+        <p class="muted">
+          The lab calls one configured model, mirrors the dispute toolkit with
+          fake tools, and never writes to PayPal. Presets are author-written
+          and results vary by model.
+        </p>
+        <p><a href="/lab" class="btn btn-primary">Open the Attack Lab</a></p>
+      </div>
+    </section>
+
+    <section class="landing-section" id="open">
+      <div class="section-head reveal">
+        <h2 class="section-title">Open source</h2>
+        <p class="section-lede">
+          The trust boundary is enforced by tests over the code itself, not by
+          a promise in a prompt.
+        </p>
+      </div>
+      <div class="card-grid">
+        <article class="card reveal">
+          <h3>Read it</h3>
+          <p class="muted">The full source, the boundary tests and the docs.</p>
+          <p><a class="btn" href="{{ site_repo_url }}" rel="noopener noreferrer">Repository</a></p>
+        </article>
+        <article class="card reveal">
+          <h3>MIT licence</h3>
+          <p class="muted">Use it, read it, adapt it. No warranty.</p>
+        </article>
+        <article class="card reveal">
+          <h3>Sandbox only</h3>
+          <p class="muted">
+            No real money moves. Not affiliated with or endorsed by PayPal.
+          </p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="landing-foot">
+    <div class="landing-foot-inner">
+      <span class="mono-badge">Orrix</span>
+      <span class="muted">Sandbox only &middot; no real money moves &middot; MIT licence</span>
+      <a href="{{ site_repo_url }}" rel="noopener noreferrer">Source</a>
+    </div>
+  </footer>
+
+  <script src="/static/landing.js"></script>
+</body>
+</html>

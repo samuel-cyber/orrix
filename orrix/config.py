@@ -106,6 +106,10 @@ class AppConfig:
     results_path: str = "results/summary.json"
     results_notes_path: str = "docs/RESULTS.md"
 
+    # The project's public repository, linked from the landing page footer.
+    # A placeholder is shown when it is unset. Not a secret.
+    site_repo_url: str = "https://github.com/example/orrix"
+
     reader_api_key: str | None = field(default=None, repr=False)
     reader_base_url: str = "https://api.openai.com/v1"
     reader_model: str = "gpt-4o-mini"
@@ -235,6 +239,7 @@ def load_config() -> AppConfig:
         ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),
+        site_repo_url=os.environ.get("SITE_REPO_URL", "https://github.com/example/orrix"),
         reader_api_key=os.environ.get("READER_API_KEY"),
         reader_base_url=os.environ.get("READER_BASE_URL", "https://api.openai.com/v1"),
         reader_model=os.environ.get("READER_MODEL", "gpt-4o-mini"),

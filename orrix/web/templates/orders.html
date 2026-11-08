@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Orders &middot; Orrix{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Order ledger</h1>
+    <p class="muted">
+      Seller-asserted shipment records, matched to disputes by the seller's
+      transaction id.
+    </p>
+  </div>
+</div>
+
+<section class="card">
+  <p class="section-note">
+    The ledger arrives in a later phase: an add form, CSV import with a
+    per-row error preview, and a searchable table.
+  </p>
+  <p class="muted">
+    Ledger entries are seller-asserted, not carrier-verified. Orrix records
+    when a row was stored so it can show whether a record predates the
+    dispute; it never treats that as proof the carrier confirmed anything.
+  </p>
+  <p><a href="/cases" class="btn">Back to cases</a></p>
+</section>
+{% endblock %}

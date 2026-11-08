@@ -2,15 +2,23 @@
 {% block title %}Not found &middot; Orrix{% endblock %}
 
 {% block content %}
-<section class="card">
-  <h1>No such case</h1>
-  <p>
-    Orrix holds no stored snapshot for
-    <span class="mono">{{ dispute_id }}</span>.
-  </p>
+<div class="page-head">
+  <div>
+    <span class="hero-eyebrow">404</span>
+    <h1>No such case</h1>
+    <p class="muted">
+      Orrix holds no stored snapshot for
+      <span class="mono">{{ dispute_id }}</span>.
+    </p>
+  </div>
+</div>
+
+<section class="card empty-state">
+  <h2>How cases arrive</h2>
   <p class="muted">
-    Cases arrive by webhook or from the polling fallback. If this dispute is
-    new, wait for the next poll.
+    Cases arrive by PayPal webhook or from the polling fallback. If this
+    dispute is new, wait for the next poll and reload. Nothing is fetched on
+    this page, so no live call was made.
   </p>
   <p><a href="/cases" class="btn">Back to cases</a></p>
 </section>

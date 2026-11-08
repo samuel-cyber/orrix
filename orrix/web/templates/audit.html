@@ -21,11 +21,34 @@
   </form>
 </div>
 
+{# Chain status banner. Filled by audit.js from /api/audit; data-state is
+   set to ok or broken so the colour comes from CSS, never from script. #}
+<section class="chain-banner" data-chain-banner data-state="ok" aria-live="polite">
+  <span class="chain-icon" aria-hidden="true"></span>
+  <div class="chain-text">
+    <strong data-chain-title>Checking the chain&hellip;</strong>
+    <p class="muted small" data-chain-detail>The audit log loads in the browser.</p>
+  </div>
+</section>
+
 <div id="verification">
   {% include "partials/verification.html" %}
 </div>
 
-<div id="audit-grid" class="ag-theme-quartz grid grid-tall"></div>
+<section class="card">
+  <h2>Timeline</h2>
+  <p class="section-note">
+    Newest first, in plain language. Open an entry for the exact row the API
+    returned; the hash chain links each entry to the one before it.
+  </p>
+  <ol id="audit-timeline" class="timeline"></ol>
+  <p id="audit-empty" class="muted empty-note" hidden></p>
+</section>
+
+<details class="payload-details table-details">
+  <summary>Show the raw table</summary>
+  <div id="audit-grid" class="ag-theme-quartz grid grid-tall"></div>
+</details>
 {% endblock %}
 
 {% block scripts %}

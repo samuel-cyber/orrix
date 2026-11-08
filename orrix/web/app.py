@@ -15,7 +15,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from ..approval import ApprovalError, DisputeVersion, create_approval
-from ..audit import OriginTag
+from ..audit import OriginTag, canonical_json, sha256_hex
 from ..errors import host_of
 from ..executor import build_evidence_payload, execute
 from ..facts import FactStatus, build_facts
@@ -51,7 +51,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 AG_GRID_VERSION = "32.3.3"
 HTMX_VERSION = "2.0.3"
 
-PUBLIC_PATHS = ("/health", "/webhooks/paypal", "/login", "/static")
+# The unauthenticated surface, pinned. "/" is exact: is_public("/") is true
+# only for the root, so every deeper route still needs a session.
+PUBLIC_PATHS = ("/", "/health", "/webhooks/paypal", "/login", "/static")
 
 ORIGIN_LABELS = {
     "paypal_record": "PayPal record",
@@ -88,6 +90,15 @@ def _csrf_ok(request: Request, submitted: str | None) -> bool:
 def _context(request: Request, **extra: Any) -> dict[str, Any]:
     services = _services(request)
     session_id = _session_id(request)
+    poll = None
+    if session_id:
+        # The topbar's "polled Ns ago" reads a stored timestamp; it never
+        # makes a network call. The public landing page has no session, so
+        # it skips this entirely.
+        try:
+            poll = services.poll_status()
+        except Exception:  # noqa: BLE001 - the indicator is cosmetic
+            poll = None
     return {
         "request": request,
         "csrf_token": services.sessions.csrf_token(session_id) if session_id else "",
@@ -98,6 +109,12 @@ def _context(request: Request, **extra: Any) -> dict[str, Any]:
         # static grid scripts. Never inlined into a script body, never
         # logged. Absent is fine: the grid runs with a watermark.
         "ag_grid_license_key": services.config.ag_grid_license_key or "",
+        # The repo link in the footer. A setting, so no literal host is
+        # baked into a template (only the one CDN host may ever appear).
+        "site_repo_url": services.config.site_repo_url,
+        # Which nav item is current. The shell compares this to each href.
+        "active": request.url.path,
+        "poll": poll,
         **extra,
     }
 
@@ -234,8 +251,12 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
         "payload": payload,
         "payload_json": json.dumps(payload, indent=2) if payload else None,
         "payload_error": payload_error,
+        # The same canonical digest the approval id is built from. Shown so
+        # the operator can see that what they read is what will be sent.
+        "payload_hash": sha256_hex(canonical_json(payload)) if payload else None,
         "seller_input": seller_input,
         "completeness": _evidence_completeness(facts),
+        "status_label": status_label(view.status),
         "delivery_statuses": [status.value for status in DeliveryStatus],
         "can_approve": PROVIDE_EVIDENCE in view.decision.allowed_actions and payload is not None,
         "last_result": services.get_result(dispute_id),
@@ -244,6 +265,169 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
         "reader_started_label": _display_timestamp(view.reader_started_at),
         "reader_finished_label": _display_timestamp(view.reader_finished_at),
         "rerun_notice": services.get_rerun_notice(dispute_id),
+    }
+
+
+def _amount_of(value: Any) -> Decimal:
+    """A dispute amount as a Decimal, or zero when it is absent or unusable."""
+    if value is None or isinstance(value, bool):
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _money(amount: Decimal, currency: str = "") -> str:
+    text = f"{amount:,.2f}"
+    return f"{text} {currency}".strip() if currency else text
+
+
+def _deadline_ring(deadline: dict[str, Any]) -> str:
+    """CSS modifier for the deadline ring: critical, soon, ok or unknown."""
+    hours = deadline.get("hours_left")
+    if hours is None:
+        return "unknown"
+    if hours <= 0:
+        return "critical"
+    if hours < 48:
+        return "soon"
+    return "ok"
+
+
+def _due_week(value: Any) -> str | None:
+    """The ISO week a deadline falls in, e.g. "W07 2026", for exposure bars."""
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    year, week, _ = stamp.isocalendar()
+    return f"W{week:02d} {year}"
+
+
+def _bars(values: dict[str, Decimal], currency: str = "") -> list[dict[str, Any]]:
+    """Labeled bars scaled to the largest value, for the inline SVG charts.
+
+    Counts are shown as integers; pass a currency to show money instead.
+    """
+    items = sorted(values.items())
+    top = max((value for _, value in items), default=Decimal("0"))
+    bars = []
+    for label, value in items:
+        pct = 0.0 if top == 0 else float(value / top) * 100.0
+        shown = _money(value, currency) if currency else str(int(value))
+        bars.append({"label": label, "value": shown, "pct": round(pct, 1)})
+    return bars
+
+
+def _overview_data(request: Request) -> dict[str, Any]:
+    """Everything the overview tiles, lists and charts need.
+
+    Reads persisted case views and the audit log only: no Reader run, no
+    PayPal call, no model call. Opening the overview costs nothing.
+    """
+    services = _services(request)
+    cases: list[dict[str, Any]] = []
+    currency = ""
+
+    for dispute_id in services.list_dispute_ids():
+        view = services.case_view(dispute_id)
+        if view is None:
+            continue
+        facts = view.facts
+        deadline = _deadline_info(facts.value("seller_response_due_date") if facts else None)
+        if facts is not None and not currency and facts.value("dispute_currency"):
+            currency = str(facts.value("dispute_currency"))
+        cases.append(
+            {
+                "dispute_id": dispute_id,
+                "amount": _amount_of(facts.value("dispute_amount") if facts else None),
+                "currency": str(facts.value("dispute_currency") or "") if facts else "",
+                "reason": str(facts.value("reason") or "") if facts else "",
+                "deadline": deadline,
+                "awaiting_approval": PROVIDE_EVIDENCE in view.decision.allowed_actions,
+                "reader_pending": view.reader_pending,
+                "status_label": status_label(view.status),
+            }
+        )
+
+    at_risk = sum((case["amount"] for case in cases), Decimal("0"))
+    awaiting = sum(1 for case in cases if case["awaiting_approval"])
+
+    soonest = None
+    for case in cases:
+        if case["deadline"]["hours_left"] is None:
+            continue
+        if soonest is None or case["deadline"]["hours_left"] < soonest["deadline"]["hours_left"]:
+            soonest = case
+
+    needs_you = []
+    for case in cases:
+        urgent = case["deadline"]["urgent"]
+        if not (urgent or case["awaiting_approval"] or case["reader_pending"]):
+            continue
+        if case["awaiting_approval"] and urgent:
+            why = "Approve before the deadline"
+        elif case["awaiting_approval"]:
+            why = "Evidence ready to approve"
+        elif case["reader_pending"]:
+            why = "Reader still needs a look"
+        else:
+            why = "Deadline approaching"
+        hours = case["deadline"]["hours_left"]
+        # Fraction of a week still on the clock, clamped. Rendered as an SVG
+        # arc length so the ring carries no inline style.
+        fraction = 0.0 if hours is None else max(min(hours / 168.0, 1.0), 0.0)
+        needs_you.append(
+            {
+                **case,
+                "ring": _deadline_ring(case["deadline"]),
+                "ring_arc": round(100.53 * fraction, 1),
+                "why": why,
+            }
+        )
+    needs_you.sort(
+        key=lambda case: (case["deadline"]["hours_left"] is None, case["deadline"]["hours_left"])
+    )
+
+    reasons: dict[str, Decimal] = {}
+    weeks: dict[str, Decimal] = {}
+    for case in cases:
+        if case["reason"]:
+            reasons[case["reason"]] = reasons.get(case["reason"], Decimal("0")) + 1
+        week = _due_week(case["deadline"]["iso"])
+        if week:
+            weeks[week] = weeks.get(week, Decimal("0")) + case["amount"]
+
+    feed = []
+    for entry in services.audit.entries()[-14:]:
+        feed.append(
+            {
+                "ts": _display_timestamp(entry.ts),
+                "actor": entry.actor,
+                "action": entry.action,
+                "dispute_id": entry.dispute_id or "",
+                "origin": ORIGIN_LABELS.get(entry.origin_tag, entry.origin_tag),
+            }
+        )
+    feed.reverse()
+
+    return {
+        "tiles": {
+            "open": len(cases),
+            "at_risk": _money(at_risk, currency),
+            "at_risk_raw": float(at_risk),
+            "currency": currency,
+            "awaiting_approval": awaiting,
+            "next_deadline": soonest["deadline"]["label"] if soonest else "none",
+            "next_deadline_id": soonest["dispute_id"] if soonest else "",
+        },
+        "needs_you": needs_you[:8],
+        "reason_bars": _bars(reasons),
+        "week_bars": _bars(weeks, currency),
+        "feed": feed,
     }
 
 
@@ -328,7 +512,7 @@ def login_submit(request: Request, password: str = Form("")) -> Response:
     services.audit.append(
         actor="admin", action="web.login", origin_tag=OriginTag.SYSTEM, payload=None
     )
-    response = RedirectResponse("/cases", status_code=303)
+    response = RedirectResponse("/overview", status_code=303)
     response.set_cookie(
         SESSION_COOKIE,
         session.session_id,
@@ -361,13 +545,41 @@ def _csrf_failure(request: Request) -> Response:
 
 
 @router.get("/", response_class=HTMLResponse)
-def index(request: Request) -> Response:
-    return RedirectResponse("/cases", status_code=303)
+def landing_page(request: Request) -> Response:
+    """The public landing page. No session required.
+
+    Proof numbers come from the evaluation summary on disk. When it is
+    absent the page says so plainly rather than showing invented numbers.
+    """
+    services = _services(request)
+    results = load_results(
+        services.config.results_path, services.config.results_notes_path
+    )
+    return templates.TemplateResponse(
+        request, "landing.html", _context(request, results=results)
+    )
+
+
+@router.get("/overview", response_class=HTMLResponse)
+def overview_page(request: Request) -> Response:
+    return templates.TemplateResponse(
+        request, "overview.html", _context(request, **_overview_data(request))
+    )
 
 
 @router.get("/cases", response_class=HTMLResponse)
 def cases_page(request: Request) -> Response:
     return templates.TemplateResponse(request, "cases.html", _context(request))
+
+
+@router.get("/orders", response_class=HTMLResponse)
+def orders_page(request: Request) -> Response:
+    return templates.TemplateResponse(request, "orders.html", _context(request))
+
+
+@router.get("/lab", response_class=HTMLResponse)
+def lab_page(request: Request) -> Response:
+    return templates.TemplateResponse(request, "lab.html", _context(request))
 
 
 @router.get("/api/cases")

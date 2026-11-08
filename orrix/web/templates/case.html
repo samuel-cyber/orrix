@@ -7,12 +7,42 @@
     <a href="/cases" class="backlink">&larr; All cases</a>
     <h1 class="mono">{{ dispute_id }}</h1>
   </div>
-  <div class="deadline {% if deadline.urgent %}deadline-urgent{% endif %}">
-    <span class="deadline-label">Seller response due</span>
-    <span class="deadline-value">{{ deadline.label }}</span>
-    {% if deadline.iso %}<span class="deadline-iso">{{ deadline.iso }}</span>{% endif %}
+  <div class="page-head-side">
+    <span class="chip chip-flag">{{ status_label }}</span>
+    <div class="deadline {% if deadline.urgent %}deadline-urgent{% endif %}">
+      <span class="deadline-label">Seller response due</span>
+      <span class="deadline-value">{{ deadline.label }}</span>
+      {% if deadline.iso %}<span class="deadline-iso">{{ deadline.iso }}</span>{% endif %}
+    </div>
   </div>
 </div>
+
+{# Stepper: bound to the real state of this case, never decorative. #}
+{% set read_ran = view.reader_result and view.reader_result.status in ("ok", "needs_review") %}
+{% set evidence_ready = completeness != "no" %}
+{% set approved = last_result and last_result.approval_id %}
+{% set submitted = last_result and last_result.status == "executed" %}
+{% set confirmed = last_result and last_result.confirmed_evidence %}
+{% set ns = namespace(open=true) %}
+<ol class="stepper" aria-label="Case progress">
+  {% for label, ok in [
+      ("Received", true),
+      ("Read", read_ran),
+      ("Evidence ready", evidence_ready),
+      ("Approved", approved),
+      ("Submitted", submitted),
+      ("Confirmed", confirmed),
+  ] %}
+  {% if ok %}
+  <li class="step done"><span class="step-dot" aria-hidden="true">&#10003;</span>{{ label }}</li>
+  {% elif ns.open %}
+  {% set ns.open = false %}
+  <li class="step current" aria-current="step"><span class="step-dot" aria-hidden="true">&bull;</span>{{ label }}</li>
+  {% else %}
+  <li class="step"><span class="step-dot" aria-hidden="true"></span>{{ label }}</li>
+  {% endif %}
+  {% endfor %}
+</ol>
 
 {% if view.discrepancy %}
 <div class="alert alert-warn" role="alert">
@@ -53,10 +83,31 @@
 </div>
 {% endif %}
 
-<div class="columns">
-  <section class="card">
-    <h2>Facts</h2>
-    <p class="section-note">Every line carries the origin it came from.</p>
+{# The trust boundary, drawn as two lanes. Left is inert buyer text; right is
+   everything Orrix is allowed to act on, each line carrying its origin. #}
+<div class="lanes">
+  <section class="lane lane-untrusted">
+    <div class="lane-title">
+      <span class="origin origin-buyer_text">{{ origin_labels["buyer_text"] }}</span>
+    </div>
+    <h2>What the buyer wrote</h2>
+    <p class="untrusted-warning">
+      Quoted verbatim and escaped. Treated as data, never as instructions, and
+      never merged into any other section. Nothing here can reach the payload.
+    </p>
+    {% if buyer_text %}
+    <blockquote class="quoted">{{ buyer_text }}</blockquote>
+    {% else %}
+    <p class="muted">No buyer text on this dispute.</p>
+    {% endif %}
+  </section>
+
+  <section class="lane lane-trusted">
+    <div class="lane-title">
+      <span class="origin origin-paypal_record">{{ origin_labels["paypal_record"] }}</span>
+    </div>
+    <h2>Trusted facts</h2>
+    <p class="section-note">PayPal record and validated seller input only. Every line carries its origin.</p>
     <table class="facts">
       <thead>
         <tr><th>Fact</th><th>Value</th><th>Status</th><th>Origin</th></tr>
@@ -73,87 +124,121 @@
       </tbody>
     </table>
   </section>
-
-  <div class="side">
-    <section class="card">
-      <h2>Orrix decision</h2>
-      <p class="section-note">
-        <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
-      </p>
-      <p>
-        <strong>Status:</strong> <span class="mono">{{ view.status }}</span><br>
-        <strong>Allowed:</strong>
-        <span class="mono">{{ view.decision.allowed_actions|sort|join(", ") or "none" }}</span>
-      </p>
-      {% if view.decision.flags %}
-      <p><strong>Flags</strong></p>
-      <ul class="flags">
-        {% for flag in view.decision.flags|sort %}
-        <li><span class="chip chip-flag">{{ flag }}</span></li>
-        {% endfor %}
-      </ul>
-      {% endif %}
-      <p><strong>Reasons</strong></p>
-      <ul class="reasons mono small">
-        {% for reason in view.decision.reasons %}
-        <li>{{ reason }}</li>
-        {% endfor %}
-      </ul>
-    </section>
-
-    <section class="card">
-      <h2>Reader summary</h2>
-      <p class="section-note">
-        <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
-        Display only. Never an input to the evidence payload.
-      </p>
-      <p><strong>Status:</strong> <span class="mono">{{ reader_summary_text }}</span></p>
-      {% if reader_endpoint_host %}
-      <p class="muted small">Endpoint host: <span class="mono">{{ reader_endpoint_host }}</span></p>
-      {% endif %}
-      {% if view.reader_result.form %}
-      <dl class="kv">
-        <dt>Claim type</dt><dd class="mono">{{ view.reader_result.form.claim_type.value }}</dd>
-        <dt>Claimed amount</dt><dd class="mono">{{ view.reader_result.form.claimed_amount }}</dd>
-        <dt>Language</dt><dd class="mono">{{ view.reader_result.form.language }}</dd>
-        <dt>Summary</dt><dd class="quoted-small">{{ view.reader_result.form.seller_summary }}</dd>
-      </dl>
-      {% endif %}
-      {% if view.reader_started_at %}
-      <p class="muted small">
-        read <span title="{{ view.reader_started_at }}">{{ reader_started_label }}</span>
-        {% if view.reader_finished_at %}
-        &rarr; <span title="{{ view.reader_finished_at }}">{{ reader_finished_label }}</span>
-        {% endif %}
-      </p>
-      {% endif %}
-
-      <form method="post" action="/cases/{{ dispute_id }}/rerun-reader" class="stack">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-quiet">Re-run reader</button>
-      </form>
-      {% if rerun_notice %}
-      <p class="muted small">{{ rerun_notice.message }}</p>
-      {% endif %}
-    </section>
-  </div>
 </div>
 
-<section class="card untrusted-block">
-  <h2>Buyer text</h2>
-  <p class="section-note">
-    <span class="origin origin-buyer_text">{{ origin_labels["buyer_text"] }}</span>
-  </p>
-  <p class="untrusted-warning">
-    Quoted verbatim and escaped. Treated as data, never as instructions, and
-    never merged into any other section.
-  </p>
-  {% if buyer_text %}
-  <blockquote class="quoted">{{ buyer_text }}</blockquote>
-  {% else %}
-  <p class="muted">No buyer text on this dispute.</p>
-  {% endif %}
-</section>
+<div class="columns">
+  <section class="card">
+    <h2>Orrix decision</h2>
+    <p class="section-note">
+      <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+      Plain code, no model. This is what Orrix will and will not do.
+    </p>
+
+    {% if can_approve %}
+    <p class="decision-line">
+      <span class="chip chip-confirmed">Evidence ready</span>
+      Everything needed is present. Approving sends the evidence to PayPal.
+    </p>
+    {% elif "awaiting_buyer_response" in view.decision.flags %}
+    <p class="decision-line">
+      <span class="chip chip-confirmed">Waiting on the buyer</span>
+      Evidence was already submitted for this dispute. Nothing left to do.
+    </p>
+    {% elif "deadline_passed" in view.decision.flags %}
+    <p class="decision-line">
+      <span class="chip chip-conflicting">Deadline passed</span>
+      The seller response window has closed. Review before acting.
+    </p>
+    {% elif "no_evidence_available" in view.decision.flags %}
+    <p class="decision-line">
+      <span class="chip chip-unavailable">No evidence yet</span>
+      No usable tracking number. Add seller input to unlock approval.
+    </p>
+    {% elif view.decision.requires_review %}
+    <p class="decision-line">
+      <span class="chip chip-flag">Needs a human</span>
+      Policy will not act on this case on its own.
+    </p>
+    {% else %}
+    <p class="decision-line">
+      <span class="chip chip-unavailable">No action</span>
+      Nothing to send for this dispute right now.
+    </p>
+    {% endif %}
+
+    <dl class="kv">
+      <dt>Status</dt><dd class="mono">{{ view.status }}</dd>
+      <dt>Allowed</dt><dd class="mono">{{ view.decision.allowed_actions|sort|join(", ") or "none" }}</dd>
+    </dl>
+
+    {% if view.decision.flags %}
+    <p class="detail-label">Flags</p>
+    <ul class="flags">
+      {% for flag in view.decision.flags|sort %}
+      <li><span class="chip chip-flag">{{ flag }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <p class="detail-label">Reasons</p>
+    <ul class="reasons mono small">
+      {% for reason in view.decision.reasons %}
+      <li>{{ reason }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>Reader result</h2>
+    <p class="section-note">
+      <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+      The Reader has no tools and returns only a validated claim form. Display
+      only; never an input to the evidence payload.
+    </p>
+
+    <p class="decision-line">
+      <span class="chip {% if view.reader_result.status == 'ok' %}chip-confirmed{% else %}chip-flag{% endif %}"><span class="mono">{{ reader_summary_text }}</span></span>
+    </p>
+
+    {% if view.reader_result.status == "needs_review" %}
+    <p class="muted small">
+      The Reader could not return a usable claim form this time. The reason and
+      HTTP status above are the diagnostic; re-run it once the endpoint is
+      healthy.
+    </p>
+    {% endif %}
+
+    {% if reader_endpoint_host %}
+    <p class="muted small">Endpoint host: <span class="mono">{{ reader_endpoint_host }}</span></p>
+    {% endif %}
+
+    {% if view.reader_result.form %}
+    <dl class="kv">
+      <dt>Claim type</dt><dd class="mono">{{ view.reader_result.form.claim_type.value }}</dd>
+      <dt>Claimed amount</dt><dd class="mono">{{ view.reader_result.form.claimed_amount }}</dd>
+      <dt>Language</dt><dd class="mono">{{ view.reader_result.form.language }}</dd>
+      <dt>Seller summary</dt><dd class="quoted-small">{{ view.reader_result.form.seller_summary }}</dd>
+    </dl>
+    {% endif %}
+
+    {% if view.reader_started_at %}
+    <p class="muted small">
+      read <span title="{{ view.reader_started_at }}">{{ reader_started_label }}</span>
+      {% if view.reader_finished_at %}
+      &rarr; <span title="{{ view.reader_finished_at }}">{{ reader_finished_label }}</span>
+      {% endif %}
+    </p>
+    {% endif %}
+
+    <form method="post" action="/cases/{{ dispute_id }}/rerun-reader" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-quiet">Re-run reader</button>
+    </form>
+    {% if rerun_notice %}
+    <p class="muted small">{{ rerun_notice.message }}</p>
+    {% endif %}
+  </section>
+</div>
 
 <div class="columns">
   <section class="card">
@@ -200,32 +285,67 @@
   </section>
 
   <section class="card">
-    <h2>Evidence payload preview</h2>
+    <h2>Evidence readiness</h2>
     <p class="section-note">
       <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
-      Built from Facts via a fixed template. This exact body is what would be sent.
+      Checked by code from the facts above.
     </p>
 
-    {% if payload_json %}
-    <pre class="payload">{{ payload_json }}</pre>
-    {% else %}
-    <p class="muted">{{ payload_error or "No payload can be built yet." }}</p>
-    {% endif %}
+    <ul class="checklist">
+      <li>
+        {% if completeness == "yes" %}
+        <svg class="check-icon check-ok" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
+        <span><strong>Tracking number</strong> confirmed by the PayPal record.</span>
+        {% elif completeness == "seller-asserted" %}
+        <svg class="check-icon check-sell" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>
+        <span><strong>Tracking number</strong> asserted by the seller, not confirmed by PayPal.</span>
+        {% else %}
+        <svg class="check-icon check-no" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7 7l6 6M13 7l-6 6"/></svg>
+        <span><strong>Tracking number</strong> missing. Approval stays locked until it is present.</span>
+        {% endif %}
+      </li>
+      <li>
+        {% if view.decision.requires_review %}
+        <svg class="check-icon check-no" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7 7l6 6M13 7l-6 6"/></svg>
+        <span><strong>Policy</strong> requires a human review before anything is sent.</span>
+        {% else %}
+        <svg class="check-icon check-ok" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
+        <span><strong>Policy</strong> has no blocking flag on this case.</span>
+        {% endif %}
+      </li>
+    </ul>
+
+    <details class="payload-details">
+      <summary>Exactly what will be sent</summary>
+      {% if payload_json %}
+      <pre class="payload">{{ payload_json }}</pre>
+      <p class="muted small mono">
+        sha256 {{ payload_hash[:16] }}&hellip;
+      </p>
+      <p class="muted small">
+        Built from the trusted facts above by a fixed template. This exact body
+        and digest are what the approval binds to.
+      </p>
+      {% else %}
+      <p class="muted">{{ payload_error or "No payload can be built yet." }}</p>
+      {% endif %}
+    </details>
 
     <form method="post" action="/cases/{{ dispute_id }}/approve" class="stack approve-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="dispute_update_time" value="{{ snapshot.get('update_time', '') }}">
       <input type="hidden" name="dispute_status" value="{{ snapshot.get('status', '') }}">
-      <button type="submit" class="btn btn-primary" {% if not can_approve %}disabled{% endif %}>
+      <button type="submit" class="btn btn-primary btn-lg" {% if not can_approve %}disabled{% endif %}>
         Approve and submit evidence
       </button>
       {% if not can_approve %}
       <p class="muted small">
-        Approval is unavailable: policy does not currently permit provide_evidence.
+        Approval is unavailable: policy does not currently permit provide_evidence,
+        or no payload can be built from the facts.
       </p>
       {% else %}
       <p class="muted small">
-        Creates an approval bound to this dispute, this payload and
+        Creates an approval bound to this dispute, this payload and version
         <span class="mono">{{ snapshot.get('update_time', '') }}</span>.
       </p>
       {% endif %}
