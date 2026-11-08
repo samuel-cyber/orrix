@@ -238,6 +238,20 @@ Ordered by how much they should worry an operator.
     SRI.
 11. **No rate limiting on the model call.** One call per read with retries
     capped, but nothing caps reads per dispute across a day.
+12. **`style-src` permits inline styles.** AG Grid sets row and cell
+    geometry through inline style attributes and injects its own style
+    elements, so a strict `style-src` broke the grid outright: production
+    logged hundreds of "Applying inline style violates ..." and the layout
+    collapsed. `style-src` is therefore
+    `'self' https://cdn.jsdelivr.net 'unsafe-inline'`.
+
+    **Scripts remain strict.** `script-src` is `'self'` plus the one pinned
+    CDN, with no `'unsafe-inline'`, no `'unsafe-eval'`, no nonce and no
+    `'strict-dynamic'`, so this does **not** permit script injection.
+    Injected markup could at worst restyle the page — move or hide an
+    element, which matters for a UI an operator reads before approving —
+    but it cannot execute. Buyer text is still escaped and quarantined, and
+    our own templates carry no style attributes.
 
 ## Known limitations
 

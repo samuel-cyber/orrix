@@ -24,13 +24,22 @@ _PBKDF2_ROUNDS = 200_000
 # in the UI is built from data.
 CDN_ORIGIN = "https://cdn.jsdelivr.net"
 
-# Exactly one remote host, and no 'unsafe-inline' anywhere. AG Grid sets
-# element styles through the CSSOM (element.style), which CSP does not
-# govern, so a strict style-src costs nothing. Templates carry no style
-# attributes and no inline script bodies; tests/test_boundaries.py enforces
-# that, and test_web.py pins this allowlist exactly.
+# Exactly one remote host. Scripts stay strict: no 'unsafe-inline' and no
+# 'unsafe-eval', so nothing on the page can execute injected code.
 SCRIPT_SRC_ALLOWLIST = ("'self'", CDN_ORIGIN)
-STYLE_SRC_ALLOWLIST = ("'self'", CDN_ORIGIN)
+
+# style-src permits inline styles because AG Grid requires them. It sets row
+# and cell geometry through inline style attributes and injects style
+# elements of its own, and a strict style-src blocked every one: production
+# logged hundreds of "Applying inline style violates ..." and the grid
+# layout collapsed. The earlier assumption that it only used the CSSOM
+# (element.style, which CSP does not govern) was wrong.
+#
+# This relaxes styling only. Script execution is unaffected: injected markup
+# could at worst restyle the page, and our own templates still carry no
+# style attributes and no inline script bodies, which
+# tests/test_boundaries.py enforces.
+STYLE_SRC_ALLOWLIST = ("'self'", CDN_ORIGIN, "'unsafe-inline'")
 
 CONTENT_SECURITY_POLICY = "; ".join(
     [

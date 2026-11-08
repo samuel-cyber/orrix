@@ -519,7 +519,11 @@ def test_every_js_file_sets_values_with_text_content():
 
 
 def test_no_template_contains_an_inline_script_body():
-    """Scripts are external files; the CSP has no 'unsafe-inline'."""
+    """Scripts are external files; script-src has no 'unsafe-inline'.
+
+    This is the directive that was kept strict. style-src permits inline
+    styles for AG Grid's sake, but nothing relaxes script execution.
+    """
     import re
 
     offenders: dict[str, list[str]] = {}
@@ -541,7 +545,13 @@ def test_no_template_contains_an_inline_script_body():
 
 
 def test_no_template_carries_an_inline_style_attribute():
-    """style-src is strict too, so no style attributes in markup."""
+    """Our own markup still carries no style attributes.
+
+    style-src now permits inline styles, because AG Grid cannot work
+    without them. That is a concession to a third-party grid, not licence
+    for our templates: styling belongs in orrix/web/static/app.css where it
+    can be read and reviewed in one place.
+    """
     offenders = [
         path.name
         for path in sorted(TEMPLATES_DIR.rglob("*.html"))

@@ -149,19 +149,58 @@ def test_csp_allows_exactly_self_and_the_one_cdn(web):
     }
 
     assert directives["script-src"] == ["'self'", CDN_ORIGIN]
-    assert directives["style-src"] == ["'self'", CDN_ORIGIN]
+    # style-src carries 'unsafe-inline' as well; see the dedicated test below.
+    assert directives["style-src"] == ["'self'", CDN_ORIGIN, "'unsafe-inline'"]
     assert directives["default-src"] == ["'self'"]
     assert directives["object-src"] == ["'none'"]
     assert directives["base-uri"] == ["'none'"]
     assert directives["frame-ancestors"] == ["'none'"]
 
 
-def test_csp_permits_no_inline_or_eval_anywhere(web):
+def test_script_src_permits_neither_inline_nor_eval(web):
+    """The directive that decides whether injected code can run.
+
+    Nothing may execute that was not served from 'self' or the one pinned
+    CDN: no inline script body, no eval, no data: URL.
+    """
+    csp = web.get("/login").headers["content-security-policy"]
+    script_src = csp.split("script-src")[1].split(";")[0]
+
+    assert "'unsafe-inline'" not in script_src
+    assert "'unsafe-eval'" not in script_src
+    assert "data:" not in script_src
+    assert "'nonce-" not in script_src
+    assert "'strict-dynamic'" not in script_src
+
+
+def test_style_src_permits_inline_styles_because_ag_grid_needs_them(web):
+    """AG Grid sets row and cell geometry with inline style attributes and
+    injects its own style elements. Without 'unsafe-inline' every one of
+    those was refused: production logged hundreds of "Applying inline style
+    violates ..." and the grid layout collapsed.
+
+    This relaxes styling only. script-src is unchanged and strict, so
+    permitting inline styles does not permit script injection -- injected
+    markup could at worst restyle the page, not execute.
+    """
+    csp = web.get("/login").headers["content-security-policy"]
+    style_src = csp.split("style-src")[1].split(";")[0]
+
+    assert "'unsafe-inline'" in style_src
+    assert "'self'" in style_src
+    assert CDN_ORIGIN in style_src
+
+
+def test_no_other_directive_permits_inline_or_eval(web):
+    """style-src is the only place 'unsafe-inline' is allowed to appear."""
     csp = web.get("/login").headers["content-security-policy"]
 
-    assert "'unsafe-inline'" not in csp
-    assert "'unsafe-eval'" not in csp
-    assert "data:" not in csp.split("script-src")[1].split(";")[0]
+    assert "'unsafe-eval'" not in csp, "eval is never permitted anywhere"
+    for part in csp.split(";"):
+        part = part.strip()
+        if not part or part.startswith("style-src"):
+            continue
+        assert "'unsafe-inline'" not in part, f"{part} must not relax inline"
 
 
 def test_only_the_one_cdn_host_appears_in_the_csp(web):
