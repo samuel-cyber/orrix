@@ -34,6 +34,7 @@ from ..pipeline import process_case, status_label
 from ..policy import PROVIDE_EVIDENCE
 from ..reader import STATUS_NEEDS_REVIEW, extract_buyer_text
 from ..seller_input import DeliveryStatus, SellerInputError, parse_seller_input
+from .lab import LAB_MESSAGE_MAX_CHARS
 from .security import (
     CSRF_FIELD,
     CSRF_HEADER,
@@ -577,9 +578,141 @@ def orders_page(request: Request) -> Response:
     return templates.TemplateResponse(request, "orders.html", _context(request))
 
 
+def _lab_context(
+    request: Request,
+    *,
+    result: dict[str, Any] | None = None,
+    submitted: str = "",
+    error: str | None = None,
+    source: str = "custom",
+    preset_id: str | None = None,
+) -> dict[str, Any]:
+    """Render context for the Attack Lab. Carries no buyer text but `submitted`."""
+    services = _services(request)
+    return _context(
+        request,
+        presets=services.lab_presets(),
+        remaining=services.lab_daily_remaining(),
+        daily_cap=services.config.lab_daily_cap,
+        per_minute=services.config.lab_per_minute,
+        message_max=LAB_MESSAGE_MAX_CHARS,
+        reader_configured=services.config.reader_is_configured,
+        result=result,
+        submitted=submitted,
+        error=error,
+        source=source,
+        preset_id=preset_id,
+    )
+
+
 @router.get("/lab", response_class=HTMLResponse)
 def lab_page(request: Request) -> Response:
-    return templates.TemplateResponse(request, "lab.html", _context(request))
+    return templates.TemplateResponse(request, "lab.html", _lab_context(request))
+
+
+@router.post("/lab", response_class=HTMLResponse)
+def lab_submit(
+    request: Request,
+    message: str = Form(""),
+    preset: str = Form(""),
+    csrf_token: str = Form(""),
+) -> Response:
+    """Run one comparison: a naive tool-calling agent beside Orrix.
+
+    Guards, in order: CSRF, a non-empty message, the length ceiling on free
+    text, the per-session per-minute limit, and the deployment-wide daily
+    cap. Presets are author-written corpus text and bypass the length check;
+    a free-text message is capped at LAB_MESSAGE_MAX_CHARS.
+    """
+    services = _services(request)
+    if not _csrf_ok(request, csrf_token):
+        return _csrf_failure(request)
+
+    chosen = services.find_preset(preset)
+    if chosen is not None:
+        buyer_text = chosen["text"]
+        source = "preset"
+        preset_id = chosen["id"]
+    else:
+        buyer_text = (message or "").strip()
+        source = "custom"
+        preset_id = None
+
+    if not buyer_text:
+        return templates.TemplateResponse(
+            request,
+            "lab.html",
+            _lab_context(
+                request,
+                submitted=message or "",
+                error="Paste a buyer message or choose a preset.",
+            ),
+            status_code=400,
+        )
+
+    if source == "custom" and len(buyer_text) > LAB_MESSAGE_MAX_CHARS:
+        return templates.TemplateResponse(
+            request,
+            "lab.html",
+            _lab_context(
+                request,
+                submitted=buyer_text,
+                error=f"Keep the message to {LAB_MESSAGE_MAX_CHARS} characters or fewer.",
+            ),
+            status_code=400,
+        )
+
+    session_id = _session_id(request) or ""
+    allowed, wait = services.lab_limiter.check(session_id)
+    if not allowed:
+        response = templates.TemplateResponse(
+            request,
+            "lab.html",
+            _lab_context(
+                request,
+                submitted=buyer_text,
+                source=source,
+                preset_id=preset_id,
+                error=(
+                    f"Limited to {services.config.lab_per_minute} runs per minute. "
+                    f"Try again in {wait}s."
+                ),
+            ),
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(wait)
+        return response
+
+    if services.lab_daily_remaining() <= 0:
+        response = templates.TemplateResponse(
+            request,
+            "lab.html",
+            _lab_context(
+                request,
+                submitted=buyer_text,
+                source=source,
+                preset_id=preset_id,
+                error="The daily lab limit has been reached. Try again tomorrow (UTC).",
+            ),
+            status_code=429,
+        )
+        response.headers["Retry-After"] = "3600"
+        return response
+
+    result = services.run_lab(buyer_text, source=source, preset_id=preset_id)
+    services.lab_limiter.record(session_id)
+
+    return templates.TemplateResponse(
+        request,
+        "lab.html",
+        _lab_context(
+            request,
+            result=result,
+            submitted=buyer_text,
+            source=source,
+            preset_id=preset_id,
+        ),
+    )
 
 
 @router.get("/api/cases")

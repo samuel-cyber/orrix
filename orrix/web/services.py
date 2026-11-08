@@ -18,6 +18,7 @@ from ..executor import ExecutedApprovals, ExecutorDeps, build_writer
 from ..paypal import SandboxPayPalClient
 from ..pipeline import CaseViewStore, PipelineDeps
 from ..seller_input import SellerEvidenceInput, parse_seller_input
+from .lab import LabRateLimiter, LabRunStore, utc_day_start
 from .security import LoginThrottle, SessionStore, hash_password, verify_password
 
 logger = logging.getLogger("orrix.web.services")
@@ -73,6 +74,17 @@ class Services:
         # notice from that attempt.
         self._rerun_attempts: dict[str, float] = {}
         self._rerun_notices: dict[str, dict[str, Any]] = {}
+
+        # The Attack Lab keeps its runs in its own table, never the
+        # hash-chained audit log, and enforces a per-session and a
+        # deployment-wide ceiling so a shared model key cannot be run up.
+        self.lab_store = LabRunStore(config.db_path)
+        try:
+            self.lab_store.init()
+        except Exception as error:  # noqa: BLE001 - a missing table is "no runs yet"
+            logger.warning("lab store unavailable: %s", type(error).__name__)
+        self.lab_limiter = LabRateLimiter(per_minute=config.lab_per_minute)
+        self._lab_presets: tuple[dict[str, str], ...] | None = None
 
         self.pipeline_deps = PipelineDeps(
             audit=self.audit,
@@ -374,3 +386,73 @@ class Services:
 
     def get_rerun_notice(self, dispute_id: str) -> dict[str, Any] | None:
         return self._rerun_notices.get(dispute_id)
+
+    # -- attack lab --------------------------------------------------------
+
+    def lab_presets(self) -> tuple[dict[str, str], ...]:
+        """Author-written corpus messages, loaded once and cached."""
+        if self._lab_presets is None:
+            from .lab import load_presets
+
+            self._lab_presets = load_presets()
+        return self._lab_presets
+
+    def find_preset(self, preset_id: str | None) -> dict[str, str] | None:
+        if not preset_id:
+            return None
+        for preset in self.lab_presets():
+            if preset["id"] == preset_id:
+                return preset
+        return None
+
+    def lab_runs_today(self) -> int:
+        """Runs started since 00:00 UTC, against the deployment-wide cap."""
+        from .lab import utc_day_start
+
+        try:
+            return self.lab_store.count_since(utc_day_start())
+        except Exception:  # noqa: BLE001 - a count we cannot read is zero pressure
+            return 0
+
+    def lab_daily_remaining(self) -> int:
+        return max(self.config.lab_daily_cap - self.lab_runs_today(), 0)
+
+    def run_lab(
+        self,
+        message: str,
+        *,
+        source: str = "custom",
+        preset_id: str | None = None,
+        session_key: str | None = None,
+        session: Any = None,
+    ) -> dict[str, Any]:
+        """Run one comparison and record it in the lab's own table.
+
+        The caller has already checked the per-session and daily ceilings;
+        this method runs the two lanes and stores metadata only. The buyer
+        text is never persisted.
+        """
+        from .lab import run_comparison
+
+        reader_config = self.config.reader_config()
+        comparison = run_comparison(
+            message,
+            reader_config=reader_config,
+            client=session if session is not None else self._reader_client,
+            policy_config=self.config.policy_config(),
+        )
+        result = comparison.as_result()
+
+        created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            self.lab_store.append(
+                result=result,
+                message=message,
+                source=source,
+                preset_id=preset_id,
+                created_at=created_at,
+            )
+        except Exception as error:  # noqa: BLE001 - a store failure must not lose the result
+            logger.warning("lab run not recorded: %s", type(error).__name__)
+
+        return result

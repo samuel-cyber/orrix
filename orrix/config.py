@@ -96,6 +96,12 @@ class AppConfig:
     login_max_failures: int = 5
     login_lockout_seconds: int = 600
 
+    #: Attack Lab guards. A signed-in operator may run a handful of lab
+    #: comparisons per minute, and the whole deployment shares a daily
+    #: ceiling so a shared model key cannot be run up without bound.
+    lab_daily_cap: int = 150
+    lab_per_minute: int = 5
+
     # Optional AG Grid Enterprise licence. Injected into the page at render
     # time so the grid runs without a watermark. Never logged, never
     # committed; without it the grid still works.
@@ -174,6 +180,7 @@ class AppConfig:
             f"audit_hmac_key_set={bool(self.audit_hmac_key)}",
             f"ag_grid_license_set={self.ag_grid_license_is_set}",
             f"login_max_failures={self.login_max_failures}",
+            f"lab_daily_cap={self.lab_daily_cap}",
         ]
 
     # -- derived service configs -----------------------------------------
@@ -236,6 +243,8 @@ def load_config() -> AppConfig:
         environment=os.environ.get("ORRIX_ENV", ENV_DEVELOPMENT),
         login_max_failures=int(_number("LOGIN_MAX_FAILURES", 5)),
         login_lockout_seconds=int(_number("LOGIN_LOCKOUT_SECONDS", 600)),
+        lab_daily_cap=int(_number("LAB_DAILY_CAP", 150)),
+        lab_per_minute=int(_number("LAB_PER_MINUTE", 5)),
         ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),

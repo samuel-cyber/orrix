@@ -6,23 +6,288 @@
   <div>
     <h1>Attack Lab</h1>
     <p class="muted">
-      Paste a hostile buyer message and compare a naive tool-calling agent
-      with Orrix. A dry run: fake tools only, no write to PayPal, one
-      configured model.
+      Paste a hostile buyer message, or pick an author-written preset, and run
+      the same text through two systems at once. A dry run: fake tools only,
+      the configured model is the only thing that reaches the wire, and no
+      write to PayPal is reachable from here.
     </p>
   </div>
 </div>
 
-<section class="card">
+{# Honest labelling, stated plainly, before any result. #}
+<section class="card lab-intro">
   <p class="section-note">
-    The interactive lab arrives in the next phase. It runs against a built-in
-    fake dispute, mirrors the dispute toolkit with fake tools, and stores its
-    runs in a separate table &mdash; never the hash-chained audit log.
+    This is a comparison, not a demonstration. The left lane is a deliberately
+    naive agent: it receives the entire dispute record &mdash; buyer message
+    included, with nothing separating it from its instructions &mdash; in one
+    turn, and holds a dry-run <span class="mono">accept_dispute_claim</span>
+    tool. When it reaches for that tool, a red <strong>UNAUTHORIZED</strong>
+    marker records a real action it took, not a rehearsal of one.
   </p>
-  <p class="muted">
-    Nothing here fabricates a result. Presets are author-written; outcomes
-    vary by model and are shown as they happen.
+  <p class="muted small">
+    The right lane is Orrix: the reader turns the buyer text into a validated
+    claim form, policy decides in plain code, and the most that can come out is
+    an approval id &mdash; exactly what the console's approve button would mint,
+    minus the write. Outcomes vary by model and are shown as they happen; no
+    result is fabricated. Runs go to the lab's own table, never the
+    hash-chained audit log.
   </p>
-  <p><a href="/cases" class="btn">Back to cases</a></p>
 </section>
+
+{# Deployment posture: the reader needs a model endpoint. #}
+{% if not reader_configured %}
+<div class="alert alert-warn" role="alert">
+  <strong>No model reader is configured here.</strong>
+  <p class="small">
+    Both lanes will run and be recorded, but the reader lane reports
+    needs-human-review and the naive lane reports no model answer. Set the
+    reader endpoint and key to run a real comparison.
+  </p>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-error" role="alert">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="lab-budget">
+    <span class="lab-budget-item">
+      <span class="lab-budget-label">Runs left today (UTC)</span>
+      <span class="lab-budget-value mono">{{ remaining }} / {{ daily_cap }}</span>
+    </span>
+    <span class="lab-budget-item">
+      <span class="lab-budget-label">Per minute (this session)</span>
+      <span class="lab-budget-value mono">{{ per_minute }}</span>
+    </span>
+    <span class="lab-budget-item">
+      <span class="lab-budget-label">Plain-language label</span>
+      <span class="lab-budget-value">fake dispute {{ 'PP-R-LAB-00000001' }}</span>
+    </span>
+  </div>
+
+  <form method="post" action="/lab" class="lab-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    {% set honest = presets | selectattr('kind', 'equalto', 'honest') | list %}
+    {% set hostile = presets | selectattr('kind', 'equalto', 'hostile') | list %}
+
+    {% if presets %}
+    <div class="stack">
+      <label for="lab-preset">Preset from the attack corpus (optional)</label>
+      <select name="preset" id="lab-preset" data-lab-preset>
+        <option value="">&mdash; none, use the message box &mdash;</option>
+        {% if honest %}
+        <optgroup label="Honest (control)">
+          {% for preset in honest %}
+          <option value="{{ preset.id }}"{% if preset_id == preset.id %} selected{% endif %}>{{ preset.category }} &middot; {{ preset.id }}</option>
+          {% endfor %}
+        </optgroup>
+        {% endif %}
+        {% if hostile %}
+        <optgroup label="Hostile (attack)">
+          {% for preset in hostile %}
+          <option value="{{ preset.id }}"{% if preset_id == preset.id %} selected{% endif %}>{{ preset.category }} &middot; {{ preset.id }}</option>
+          {% endfor %}
+        </optgroup>
+        {% endif %}
+      </select>
+      <p class="muted small" data-lab-preset-note>
+        A chosen preset takes precedence over the message box.
+      </p>
+    </div>
+    {% else %}
+    <p class="muted small">
+      No presets are available (the corpus is not installed). Paste a message
+      below.
+    </p>
+    {% endif %}
+
+    <div class="stack">
+      <label for="lab-message">Hostile buyer message</label>
+      <textarea name="message" id="lab-message" rows="6"
+                maxlength="{{ message_max }}"
+                data-lab-message data-lab-max="{{ message_max }}"
+                placeholder="Paste the buyer's message here&hellip;">{{ submitted }}</textarea>
+      <p class="muted small">
+        <span data-lab-counter aria-live="polite">{{ submitted | length }} / {{ message_max }}</span>
+        characters. Maximum {{ message_max }}.
+      </p>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Run both lanes</button>
+  </form>
+</section>
+
+{% if result %}
+{# -- two lanes over one message ------------------------------------- #}
+<section class="lanes" aria-label="Comparison result">
+
+  <div class="lane lane-untrusted">
+    <div class="lane-title">
+      <span aria-hidden="true">&#9888;</span>
+      Naive agent &mdash; no trust boundary
+    </div>
+
+    {% if result.naive_unauthorized > 0 %}
+    <p class="unauthorized-marker" role="alert">
+      <span class="unauthorized-badge">UNAUTHORIZED</span>
+      Accepted the claim and refunded the buyer in full
+      ({{ result.naive_unauthorized }} recorded action{{ '' if result.naive_unauthorized == 1 else 's' }}).
+    </p>
+    {% else %}
+    <p class="muted small">
+      No unauthorized action recorded in this run.
+    </p>
+    {% endif %}
+
+    <dl class="kv">
+      <dt>Model turns</dt>
+      <dd class="mono">{{ result.naive.steps }} (ceiling 4)</dd>
+      <dt>Model calls</dt>
+      <dd class="mono">{{ result.naive_model_calls }}</dd>
+    </dl>
+
+    {% if result.naive.error == 'reader_not_configured' %}
+    <p class="muted small">No model reader configured; the lane recorded no answer.</p>
+    {% elif result.naive.error == 'no_response' %}
+    <p class="muted small">The model never answered.</p>
+    {% endif %}
+
+    <h2 class="lane-subhead">Actions the agent took</h2>
+    {% if result.naive.tool_calls %}
+    <ul class="lab-calls">
+      {% for call in result.naive.tool_calls %}
+      <li class="lab-call">
+        <span class="mono">{{ call.name }}</span>
+        {% if call.accepted %}<span class="chip chip-conflicting">accepted &middot; unauthorized</span>{% else %}<span class="chip chip-unavailable">observed</span>{% endif %}
+        {% if call.arguments %}<div class="quoted-small mono">{{ call.arguments }}</div>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted small">No actions recorded.</p>
+    {% endif %}
+
+    {% if result.naive.final_summary %}
+    <h2 class="lane-subhead">What the agent said it did</h2>
+    <div class="quoted-small">{{ result.naive.final_summary }}</div>
+    {% endif %}
+  </div>
+
+  <div class="lane lane-trusted">
+    <div class="lane-title">
+      <span aria-hidden="true">&#9878;</span>
+      Orrix &mdash; reader, policy, approval
+    </div>
+
+    <p class="decision-line">
+      <span class="status-pill {{ 'pill-action' if result.orrix_decision == 'provide_evidence' else 'pill-review' if result.orrix_decision == 'needs_review' else 'pill-none' }}">
+        {% if result.orrix_decision == 'provide_evidence' %}Provide evidence (approval minted){% elif result.orrix_decision == 'needs_review' %}Needs human review{% else %}No action{% endif %}
+      </span>
+      <span class="muted small">Model calls {{ result.orrix_model_calls }}</span>
+    </p>
+
+    <dl class="kv">
+      <dt>Reader status</dt>
+      <dd class="mono">{{ result.orrix.reader_status or '&mdash;' }}</dd>
+      {% if result.orrix.reader_reason %}
+      <dt>Reader reason</dt>
+      <dd class="mono">{{ result.orrix.reader_reason }}</dd>
+      {% endif %}
+    </dl>
+
+    {% if result.orrix.failure %}
+    <div class="alert alert-error" role="alert">{{ result.orrix.failure }}</div>
+    {% endif %}
+
+    <h2 class="lane-subhead">Validated claim form</h2>
+    {% if result.orrix.claim_form %}
+    <dl class="kv">
+      <dt>Claim type</dt>
+      <dd class="mono">{{ result.orrix.claim_form.claim_type }}</dd>
+      <dt>Claimed amount</dt>
+      <dd class="mono">{{ result.orrix.claim_form.claimed_amount }}</dd>
+      <dt>Language</dt>
+      <dd class="mono">{{ result.orrix.claim_form.language }}</dd>
+      {% if result.orrix.claim_form.amount_was_clamped %}
+      <dt>Note</dt>
+      <dd>The amount was clamped to the dispute ceiling.</dd>
+      {% endif %}
+    </dl>
+    <div class="quoted-small">{{ result.orrix.claim_form.seller_summary }}</div>
+    {% else %}
+    <p class="muted small">
+      No form was produced. Buyer text never reaches a policy decision or an
+      evidence payload on its own.
+    </p>
+    {% endif %}
+
+    {% if result.orrix.policy %}
+    <h2 class="lane-subhead">Policy (plain code)</h2>
+    <p class="decision-line">
+      {% for action in result.orrix.policy.allowed_actions %}
+      <span class="chip chip-confirmed mono">{{ action }}</span>
+      {% else %}
+      <span class="chip chip-unavailable">no action permitted</span>
+      {% endfor %}
+      {% if result.orrix.policy.requires_review %}
+      <span class="chip chip-flag">requires review</span>
+      {% endif %}
+    </p>
+    {% if result.orrix.policy.flags %}
+    <ul class="flags">
+      {% for flag in result.orrix.policy.flags %}
+      <li class="chip chip-flag mono">{{ flag }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if result.orrix.policy.reasons %}
+    <ul class="reasons small">
+      {% for reason in result.orrix.policy.reasons %}
+      <li>{{ reason }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% endif %}
+
+    <h2 class="lane-subhead">Approval</h2>
+    {% if result.orrix.approval_id %}
+    <p class="mono small">{{ result.orrix.approval_id }}</p>
+    <p class="muted small">
+      Minted here, never executed. The approval is bound to this payload and
+      this dispute version; only the executor could act on it, and this lane
+      does not call it.
+    </p>
+    {% if result.orrix.payload_json %}
+    <details class="payload-details">
+      <summary>Exactly what a write would carry</summary>
+      <pre class="payload">{{ result.orrix.payload_json }}</pre>
+      {% if result.orrix.payload_hash %}
+      <p class="muted small mono">sha256 {{ result.orrix.payload_hash[:16] }}&hellip;</p>
+      {% endif %}
+    </details>
+    {% endif %}
+    {% else %}
+    <p class="muted small">
+      No approval was minted: policy did not permit provide_evidence for this
+      run. That is a decision, not a failure.
+    </p>
+    {% endif %}
+  </div>
+
+</section>
+{% else %}
+<section class="card empty-state">
+  <h2>Nothing run yet</h2>
+  <p class="muted">
+    Pick a preset or paste a message and run both lanes. The comparison appears
+    here, left against right, over one built-in dispute.
+  </p>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/lab.js"></script>
 {% endblock %}
