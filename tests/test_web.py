@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from orrix import store, webhooks
 from orrix.main import create_app
+from orrix.web.app import _display_timestamp
 from orrix.web.security import SESSION_COOKIE
 
 from .conftest import (
@@ -23,6 +24,69 @@ from .conftest import (
     recorded_snapshot,
     build_app_config,
 )
+
+#: A reader base_url that is never contacted; used only so its host appears
+#: on the page and its full form can be asserted absent.
+READER_BASE_URL = "https://reader.example.invalid/v1"
+READER_API_KEY = "sk-test-DO-NOT-LOG-abcdef123456"
+
+
+class FakeChatResponse:
+    """Stands in for a requests.Response from the model endpoint."""
+
+    def __init__(self, status_code=200, body=None):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+class FakeChatClient:
+    """Records every request and serves queued responses. No network call."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.requests: list[dict] = []
+
+    def post(self, url, **kwargs):
+        self.requests.append({"url": url, **kwargs})
+        if not self._responses:
+            raise AssertionError("FakeChatClient ran out of queued responses")
+        if len(self._responses) == 1:
+            return self._responses[0]
+        return self._responses.pop(0)
+
+
+def chat_body(seller_summary="Buyer says the package never arrived."):
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "claim_type": "NOT_RECEIVED",
+                            "claimed_amount": "20.00",
+                            "language": "en",
+                            "seller_summary": seller_summary,
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+
+def build_reader_app(tmp_path, snapshot, writer, chat_client):
+    """An app with a stored case and a Reader configured against a fake host."""
+    config = build_app_config(
+        tmp_path,
+        reader_api_key=READER_API_KEY,
+        reader_base_url=READER_BASE_URL,
+        reader_model="test-model",
+    )
+    store.save_case_snapshot(snapshot["dispute_id"], snapshot)
+    return create_app(config=config, writer=writer, reader_client=chat_client)
 
 SELLER_FORM = {
     "carrier": "FEDEX",
@@ -38,6 +102,7 @@ PROTECTED_POSTS = (
     "/logout",
     f"/cases/{FIXTURE_DISPUTE_ID}/seller-input",
     f"/cases/{FIXTURE_DISPUTE_ID}/approve",
+    f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader",
     "/audit/verify",
 )
 
@@ -205,6 +270,12 @@ def test_seller_input_cannot_be_submitted_by_get(web):
     sign_in(web)
 
     assert web.get(f"/cases/{FIXTURE_DISPUTE_ID}/seller-input").status_code == 405
+
+
+def test_rerun_reader_cannot_be_triggered_by_get(web):
+    sign_in(web)
+
+    assert web.get(f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader").status_code == 405
 
 
 # -- buyer text is escaped and isolated ---------------------------------
@@ -562,3 +633,147 @@ def test_the_audit_api_carries_no_buyer_text(web):
     body = web.get("/api/audit").text
 
     assert FIXTURE_INJECTION not in body
+
+
+# -- reader summary: reason, HTTP status, endpoint host -----------------
+
+
+def test_display_timestamp_formats_readably():
+    assert _display_timestamp("2026-11-08T14:47:00+00:00") == "8 Nov 2026, 14:47 UTC"
+    assert _display_timestamp("2026-11-08T14:47:00Z") == "8 Nov 2026, 14:47 UTC"
+    assert _display_timestamp(None) is None
+    assert _display_timestamp("") is None
+
+
+def test_reader_summary_shows_reason_and_http_status_without_leaking_url_or_key(
+    tmp_path, snapshot, writer
+):
+    chat_client = FakeChatClient([FakeChatResponse(status_code=404, body={"error": "nope"})])
+    application = build_reader_app(tmp_path, snapshot, writer, chat_client)
+
+    with TestClient(application, follow_redirects=False) as client:
+        sign_in(client)
+        body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+
+    assert "needs_review · http_error (HTTP 404)" in body
+    # Only the host, never the path, the scheme-free base URL, or the key.
+    assert "reader.example.invalid" in body
+    assert "https://reader.example.invalid" not in body
+    assert "/chat/completions" not in body
+    assert READER_API_KEY not in body
+
+
+def test_reader_summary_shows_ok_status_with_no_reason_or_http_status_noise(
+    tmp_path, snapshot, writer
+):
+    chat_client = FakeChatClient([FakeChatResponse(body=chat_body())])
+    application = build_reader_app(tmp_path, snapshot, writer, chat_client)
+
+    with TestClient(application, follow_redirects=False) as client:
+        sign_in(client)
+        body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+
+    assert "<span class=\"mono\">ok</span>" in body
+    assert READER_API_KEY not in body
+    assert "https://reader.example.invalid" not in body
+
+
+def test_reader_timestamps_are_shown_readably_with_the_raw_value_in_a_title(
+    tmp_path, snapshot, writer
+):
+    chat_client = FakeChatClient([FakeChatResponse(body=chat_body())])
+    application = build_reader_app(tmp_path, snapshot, writer, chat_client)
+
+    with TestClient(application, follow_redirects=False) as client:
+        sign_in(client)
+        body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+
+    match = re.search(r'read <span title="([^"]+)">([^<]+)</span>', body)
+    assert match, "no reader timestamp was rendered"
+    raw, label = match.groups()
+    assert re.match(r"\d{4}-\d{2}-\d{2}T", raw), "the raw ISO timestamp must sit in the title"
+    assert "UTC" in label
+    assert not re.match(r"\d{4}-\d{2}-\d{2}T", label), "the label must not be the raw ISO string"
+
+
+# -- re-run reader --------------------------------------------------------
+
+
+def test_rerun_reader_runs_once_and_shows_the_new_result_with_an_audit_entry(
+    tmp_path, snapshot, writer
+):
+    chat_client = FakeChatClient(
+        [
+            FakeChatResponse(body=chat_body("Initial read.")),
+            FakeChatResponse(body=chat_body("Second read after rerun.")),
+        ]
+    )
+    application = build_reader_app(tmp_path, snapshot, writer, chat_client)
+
+    with TestClient(application, follow_redirects=False) as client:
+        sign_in(client)
+        first_body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+        assert "Initial read." in first_body
+
+        token = csrf_from(client, path=f"/cases/{FIXTURE_DISPUTE_ID}")
+        response = client.post(
+            f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader", data={"csrf_token": token}
+        )
+        assert response.status_code == 303
+
+        second_body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+        actions = [entry.action for entry in application.state.services.audit.entries()]
+
+    assert "Second read after rerun." in second_body
+    assert "Initial read." not in second_body
+    assert "Reader re-run complete" in second_body
+    assert len(chat_client.requests) == 2
+    assert READER_API_KEY not in second_body
+    assert "https://reader.example.invalid" not in second_body
+    assert any(action.startswith("web.reader_rerun:ok") for action in actions)
+
+
+def test_rerun_reader_is_rate_limited_to_one_run_per_30_seconds(tmp_path, snapshot, writer):
+    chat_client = FakeChatClient([FakeChatResponse(body=chat_body()) for _ in range(3)])
+    application = build_reader_app(tmp_path, snapshot, writer, chat_client)
+
+    with TestClient(application, follow_redirects=False) as client:
+        sign_in(client)
+        client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True)
+        assert len(chat_client.requests) == 1
+
+        token = csrf_from(client, path=f"/cases/{FIXTURE_DISPUTE_ID}")
+        first = client.post(
+            f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader", data={"csrf_token": token}
+        )
+        assert first.status_code == 303
+        assert len(chat_client.requests) == 2
+
+        token = csrf_from(client, path=f"/cases/{FIXTURE_DISPUTE_ID}")
+        second = client.post(
+            f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader", data={"csrf_token": token}
+        )
+        assert second.status_code == 303
+        body = client.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+        actions = [entry.action for entry in application.state.services.audit.entries()]
+
+    assert len(chat_client.requests) == 2, "a rate-limited attempt must not call the reader"
+    assert "limited to once every 30 seconds" in body
+    assert "web.reader_rerun_refused:rate_limited" in actions
+
+
+def test_rerun_reader_without_a_configured_reader_says_so_clearly(web):
+    sign_in(web)
+    token = csrf_from(web, path=f"/cases/{FIXTURE_DISPUTE_ID}")
+
+    response = web.post(
+        f"/cases/{FIXTURE_DISPUTE_ID}/rerun-reader", data={"csrf_token": token}
+    )
+    assert response.status_code == 303
+
+    body = web.get(f"/cases/{FIXTURE_DISPUTE_ID}", follow_redirects=True).text
+    assert "Reader is not configured" in body
+
+    services = web.app.state.services
+    actions = [entry.action for entry in services.audit.entries()]
+    assert "web.reader_rerun_refused:reader_not_configured" in actions

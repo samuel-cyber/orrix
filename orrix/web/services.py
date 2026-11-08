@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Callable
 
 from ..audit import AuditLog
@@ -19,6 +20,11 @@ from ..seller_input import SellerEvidenceInput, parse_seller_input
 from .security import LoginThrottle, SessionStore, hash_password, verify_password
 
 logger = logging.getLogger("orrix.web.services")
+
+#: Minimum seconds between two actual Reader runs for the same case, so a
+#: "Re-run reader" button cannot be used to spend the model budget by
+#: repeated clicks.
+RERUN_COOLDOWN_SECONDS = 30
 
 
 class Services:
@@ -61,6 +67,11 @@ class Services:
         # its payload from Facts at execution time.
         self._seller_inputs: dict[str, SellerEvidenceInput] = {}
         self._results: dict[str, dict[str, Any]] = {}
+        # Last "Re-run reader" attempt per dispute (monotonic-ish, via
+        # time.time so a test can freeze/advance it) and the operator-facing
+        # notice from that attempt.
+        self._rerun_attempts: dict[str, float] = {}
+        self._rerun_notices: dict[str, dict[str, Any]] = {}
 
         self.pipeline_deps = PipelineDeps(
             audit=self.audit,
@@ -299,3 +310,24 @@ class Services:
 
     def get_result(self, dispute_id: str) -> dict[str, Any] | None:
         return self._results.get(dispute_id)
+
+    # -- reader re-run rate limiting ---------------------------------------
+
+    def rerun_ready(self, dispute_id: str) -> tuple[bool, int]:
+        """Whether a Reader re-run may proceed now, and seconds to wait if not."""
+        last = self._rerun_attempts.get(dispute_id)
+        if last is None:
+            return True, 0
+        elapsed = time.time() - last
+        if elapsed >= RERUN_COOLDOWN_SECONDS:
+            return True, 0
+        return False, max(int(RERUN_COOLDOWN_SECONDS - elapsed), 1)
+
+    def record_rerun(self, dispute_id: str) -> None:
+        self._rerun_attempts[dispute_id] = time.time()
+
+    def set_rerun_notice(self, dispute_id: str, notice: dict[str, Any]) -> None:
+        self._rerun_notices[dispute_id] = notice
+
+    def get_rerun_notice(self, dispute_id: str) -> dict[str, Any] | None:
+        return self._rerun_notices.get(dispute_id)

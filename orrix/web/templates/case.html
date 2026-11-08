@@ -107,11 +107,10 @@
         <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
         Display only. Never an input to the evidence payload.
       </p>
-      <p><strong>Status:</strong> <span class="mono">{{ view.reader_result.status }}</span>
-        {% if view.reader_result.reason %}
-        &middot; <span class="mono">{{ view.reader_result.reason }}</span>
-        {% endif %}
-      </p>
+      <p><strong>Status:</strong> <span class="mono">{{ reader_summary_text }}</span></p>
+      {% if reader_endpoint_host %}
+      <p class="muted small">Endpoint host: <span class="mono">{{ reader_endpoint_host }}</span></p>
+      {% endif %}
       {% if view.reader_result.form %}
       <dl class="kv">
         <dt>Claim type</dt><dd class="mono">{{ view.reader_result.form.claim_type.value }}</dd>
@@ -122,8 +121,19 @@
       {% endif %}
       {% if view.reader_started_at %}
       <p class="muted small">
-        read {{ view.reader_started_at }}{% if view.reader_finished_at %} &rarr; {{ view.reader_finished_at }}{% endif %}
+        read <span title="{{ view.reader_started_at }}">{{ reader_started_label }}</span>
+        {% if view.reader_finished_at %}
+        &rarr; <span title="{{ view.reader_finished_at }}">{{ reader_finished_label }}</span>
+        {% endif %}
       </p>
+      {% endif %}
+
+      <form method="post" action="/cases/{{ dispute_id }}/rerun-reader" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-quiet">Re-run reader</button>
+      </form>
+      {% if rerun_notice %}
+      <p class="muted small">{{ rerun_notice.message }}</p>
       {% endif %}
     </section>
   </div>

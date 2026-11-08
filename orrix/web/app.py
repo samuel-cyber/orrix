@@ -26,12 +26,13 @@ from pydantic import ValidationError
 
 from ..approval import ApprovalError, DisputeVersion, create_approval
 from ..audit import OriginTag
+from ..errors import host_of
 from ..executor import build_evidence_payload, execute
 from ..facts import FactStatus, build_facts
 from ..evaluation import load_results
 from ..pipeline import process_case, status_label
 from ..policy import PROVIDE_EVIDENCE
-from ..reader import extract_buyer_text
+from ..reader import STATUS_NEEDS_REVIEW, extract_buyer_text
 from ..seller_input import DeliveryStatus, SellerInputError, parse_seller_input
 from .security import (
     CSRF_FIELD,
@@ -39,6 +40,7 @@ from .security import (
     SECURITY_HEADERS,
     SESSION_COOKIE,
 )
+from .services import RERUN_COOLDOWN_SECONDS
 
 logger = logging.getLogger("orrix.web")
 
@@ -128,6 +130,48 @@ def _deadline_info(due: Any) -> dict[str, Any]:
     }
 
 
+def _reader_summary_text(result) -> str:
+    """Plain-text status line for the Reader summary box.
+
+    Carries only the fixed status/reason codes and an HTTP status code when
+    one exists -- never raw model output, a URL, or a key.
+    """
+    if result.status != STATUS_NEEDS_REVIEW:
+        return result.status
+    text = result.status
+    if result.reason:
+        text += f" · {result.reason}"
+    if result.http_status:
+        text += f" (HTTP {result.http_status})"
+    return text
+
+
+def _reader_endpoint_host(config) -> str | None:
+    """The reader's endpoint host, stripped of path, query and credentials."""
+    if not config.reader_is_configured:
+        return None
+    return host_of(config.reader_base_url)
+
+
+def _display_timestamp(value: Any) -> str | None:
+    """A readable local-style rendering of a stored UTC timestamp.
+
+    e.g. "8 Nov 2026, 14:47 UTC". The raw value is kept separately (in a
+    title attribute) so nothing is lost, only reformatted.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    return f"{parsed.day} {parsed.strftime('%b %Y, %H:%M')} UTC"
+
+
 def _evidence_completeness(facts) -> str:
     """has tracking? yes / seller-asserted / no."""
     if facts is None:
@@ -195,6 +239,11 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
         "delivery_statuses": [status.value for status in DeliveryStatus],
         "can_approve": PROVIDE_EVIDENCE in view.decision.allowed_actions and payload is not None,
         "last_result": services.get_result(dispute_id),
+        "reader_summary_text": _reader_summary_text(view.reader_result),
+        "reader_endpoint_host": _reader_endpoint_host(services.config),
+        "reader_started_label": _display_timestamp(view.reader_started_at),
+        "reader_finished_label": _display_timestamp(view.reader_finished_at),
+        "rerun_notice": services.get_rerun_notice(dispute_id),
     }
 
 
@@ -555,6 +604,89 @@ def approve(
             "message": _result_message(result),
             "confirmed_evidence": _confirmation_rows(confirmation),
         },
+    )
+    return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+
+@router.post("/cases/{dispute_id}/rerun-reader", response_class=HTMLResponse)
+def rerun_reader(
+    request: Request, dispute_id: str, csrf_token: str = Form("")
+) -> Response:
+    """Force a fresh Reader read for this case, bypassing the cached result.
+
+    Rate-limited to one actual run per case per RERUN_COOLDOWN_SECONDS, so a
+    stuck page cannot be used to spend the model budget by repeated clicks.
+    An attempt while the Reader is not configured is refused before the
+    rate limit is even checked, since it costs nothing and the operator
+    should be told clearly rather than see a generic "needs_review".
+    """
+    if not _csrf_ok(request, csrf_token):
+        return _csrf_failure(request)
+
+    services = _services(request)
+    snapshot = services.case_snapshot(dispute_id)
+    if snapshot is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    if not services.config.reader_is_configured:
+        services.set_rerun_notice(
+            dispute_id,
+            {
+                "status": "not_configured",
+                "message": "The Reader is not configured: set READER_API_KEY to enable it.",
+            },
+        )
+        services.audit.append(
+            actor="admin",
+            action="web.reader_rerun_refused:reader_not_configured",
+            origin_tag=OriginTag.SYSTEM,
+            dispute_id=dispute_id,
+            payload=None,
+        )
+        return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+    allowed, retry_after = services.rerun_ready(dispute_id)
+    if not allowed:
+        services.set_rerun_notice(
+            dispute_id,
+            {
+                "status": "rate_limited",
+                "message": (
+                    f"Re-run is limited to once every {RERUN_COOLDOWN_SECONDS} "
+                    f"seconds. Try again in {retry_after}s."
+                ),
+            },
+        )
+        services.audit.append(
+            actor="admin",
+            action="web.reader_rerun_refused:rate_limited",
+            origin_tag=OriginTag.SYSTEM,
+            dispute_id=dispute_id,
+            payload=None,
+        )
+        return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+    services.record_rerun(dispute_id)
+    seller_input = services.get_seller_input(dispute_id)
+    # reuse_reader=False bypasses the cached result for this update_time, so
+    # this is the one path that re-reads a dispute the model has already
+    # seen.
+    view = process_case(
+        snapshot, services.pipeline_deps, seller_input=seller_input, reuse_reader=False
+    )
+
+    services.audit.append(
+        actor="admin",
+        action=f"web.reader_rerun:{view.reader_result.status}:{view.reader_result.reason or 'ok'}",
+        origin_tag=OriginTag.READER_OUTPUT,
+        dispute_id=dispute_id,
+        payload=None,
+    )
+    services.set_rerun_notice(
+        dispute_id,
+        {"status": "ran", "message": "Reader re-run complete; the result below is new."},
     )
     return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
 
