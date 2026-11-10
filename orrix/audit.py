@@ -219,23 +219,61 @@ class AuditLog:
 
         return AuditEntry(**{**entry.__dict__, "entry_hash": entry_hash})
 
+    @staticmethod
+    def _entry(row: Any) -> AuditEntry:
+        return AuditEntry(
+            seq=row["seq"],
+            ts=row["ts"],
+            actor=row["actor"],
+            action=row["action"],
+            dispute_id=row["dispute_id"],
+            origin_tag=row["origin_tag"],
+            payload_hash=row["payload_hash"],
+            prev_hash=row["prev_hash"],
+            entry_hash=row["entry_hash"],
+        )
+
     def entries(self) -> list[AuditEntry]:
+        """Every entry, oldest first. Used by verify_chain, which needs all."""
         with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM audit_log ORDER BY seq ASC").fetchall()
-        return [
-            AuditEntry(
-                seq=row["seq"],
-                ts=row["ts"],
-                actor=row["actor"],
-                action=row["action"],
-                dispute_id=row["dispute_id"],
-                origin_tag=row["origin_tag"],
-                payload_hash=row["payload_hash"],
-                prev_hash=row["prev_hash"],
-                entry_hash=row["entry_hash"],
-            )
-            for row in rows
-        ]
+        return [self._entry(row) for row in rows]
+
+    def recent(self, limit: int = 100, before_seq: int | None = None) -> list[AuditEntry]:
+        """One page of entries, newest first.
+
+        `before_seq` is a cursor: pass the lowest seq you already hold to get
+        the page below it. Keyset paging rather than OFFSET, so paging stays
+        cheap however deep it goes and cannot skip or repeat a row when the
+        log is appended to between requests.
+
+        This is for display. Chain verification always reads the whole log --
+        see verify_chain -- so a page is never the basis for an integrity
+        claim.
+        """
+        limit = max(1, min(int(limit), 1000))
+
+        with closing(self._connect()) as connection, connection:
+            if before_seq is None:
+                rows = connection.execute(
+                    "SELECT * FROM audit_log ORDER BY seq DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM audit_log WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                    (int(before_seq), limit),
+                ).fetchall()
+        return [self._entry(row) for row in rows]
+
+    def count(self) -> int:
+        with closing(self._connect()) as connection, connection:
+            return connection.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+
+    def oldest_seq(self) -> int | None:
+        """The lowest seq in the log, so a caller knows when paging is done."""
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute("SELECT MIN(seq) AS seq FROM audit_log").fetchone()
+        return row["seq"] if row and row["seq"] is not None else None
 
     def verify_chain(self) -> int | None:
         """Return the seq of the first bad entry, or None if the chain holds."""

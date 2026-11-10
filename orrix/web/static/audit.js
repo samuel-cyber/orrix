@@ -8,6 +8,14 @@
   var STORAGE_KEY = "orrix.audit.columnState.v1";
   var firstBadSeq = null;
 
+  // Paging state. The newest page arrives with the document; "Load older"
+  // fetches the next page down and appends it. Rows accumulate here so the
+  // grid and the timeline always show the same set.
+  var loaded = [];
+  var nextBeforeSeq = null;
+  var hasMore = false;
+  var totalEntries = 0;
+
   // -- readable labels ---------------------------------------------------
 
   var ACTION_LABEL = {
@@ -199,8 +207,11 @@
           " onward is highlighted below and cannot be vouched for.";
       } else {
         var how = payload.keyed ? "with HMAC" : "with plain SHA-256";
+        // The whole log, not the page: verify_chain always walks every
+        // entry server-side, however few rows this response carried.
+        var verified = payload.total == null ? payload.entries : payload.total;
         detail.textContent =
-          payload.entries + " entries verified " + how +
+          verified + " entries verified " + how +
           (payload.keyed ? "" : ". No AUDIT_HMAC_KEY, so a forger with database access could rebuild it.");
       }
     }
@@ -283,16 +294,73 @@
       });
     }
 
-    function load() {
-      return OrrixGrid.loadJson("/api/audit").then(function (payload) {
+    var pagingBox = document.querySelector("[data-audit-paging]");
+    var olderButton = document.querySelector("[data-audit-load-older]");
+    var shownNote = document.querySelector("[data-audit-shown]");
+
+    function paintPaging() {
+      if (pagingBox) {
+        pagingBox.hidden = loaded.length === 0;
+      }
+      if (olderButton) {
+        olderButton.disabled = !hasMore;
+        olderButton.hidden = !hasMore;
+      }
+      if (shownNote) {
+        shownNote.textContent = hasMore
+          ? "Showing the newest " + loaded.length + " of " + totalEntries + " entries."
+          : "Showing all " + loaded.length + " entries.";
+      }
+    }
+
+    function paint() {
+      renderTimeline(loaded);
+      if (api) {
+        api.setGridOption("rowData", loaded);
+        api.redrawRows();
+      }
+      paintPaging();
+    }
+
+    // `before` null loads the newest page and resets what is held.
+    function loadPage(before) {
+      var url = "/api/audit?limit=100";
+      if (before !== null && before !== undefined) {
+        url += "&before_seq=" + encodeURIComponent(before);
+      }
+      return OrrixGrid.loadJson(url).then(function (payload) {
         firstBadSeq = payload.first_bad_seq;
-        renderBanner(payload);
-        renderTimeline(payload.rows || []);
-        if (api) {
-          api.setGridOption("rowData", payload.rows || []);
-          api.redrawRows();
+        totalEntries = payload.total == null ? 0 : payload.total;
+        hasMore = payload.has_more === true;
+        nextBeforeSeq = payload.next_before_seq;
+
+        var rows = payload.rows || [];
+        if (before === null || before === undefined) {
+          loaded = rows;
+        } else {
+          loaded = loaded.concat(rows);
         }
+
+        renderBanner(payload);
+        paint();
         return payload;
+      });
+    }
+
+    function load() {
+      return loadPage(null);
+    }
+
+    if (olderButton) {
+      olderButton.addEventListener("click", function () {
+        if (!hasMore || nextBeforeSeq === null || nextBeforeSeq === undefined) {
+          return;
+        }
+        olderButton.disabled = true;
+        loadPage(nextBeforeSeq)["catch"](function () {
+          // A failed page must not leave the control stuck off.
+          olderButton.disabled = false;
+        });
       });
     }
 

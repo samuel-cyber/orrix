@@ -715,6 +715,18 @@ details.payload-preview summary {
 .grid { height: 560px; width: 100%; }
 .grid-tall { height: 640px; }
 .empty-note { padding: var(--sp-3) 0; }
+
+/* Paging control under a long list: the button and what it has loaded. */
+.load-more {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) 0 0;
+  border-top: 1px solid var(--line);
+  margin-top: var(--sp-3);
+}
+.load-more[hidden] { display: none; }
 .urgent-cell { color: var(--err); font-weight: 700; }
 
 /* == login =========================================================== */

@@ -1796,17 +1796,44 @@ def audit_page(request: Request) -> Response:
     return templates.TemplateResponse(request, "audit.html", _context(request, verification=None))
 
 
+#: Entries per /api/audit page. The log reaches five figures on a running
+#: deployment -- rendering it whole was a 1.6 MB response and a frozen page.
+AUDIT_PAGE_SIZE = 100
+AUDIT_MAX_PAGE_SIZE = 500
+
+
 @router.get("/api/audit")
-def api_audit(request: Request) -> Response:
-    """Audit rows with chain integrity decided server-side.
+def api_audit(request: Request, limit: int = AUDIT_PAGE_SIZE, before_seq: int | None = None) -> Response:
+    """One page of audit rows, newest first, with integrity decided server-side.
 
     The browser is told whether each row verifies; it never recomputes a
     hash itself, so the grid cannot disagree with the server about what is
     intact.
+
+    Paging is display-only. `verify_chain` still walks the entire chain on
+    every request, so `chain_ok` and `first_bad_seq` describe the whole log
+    and not just the page -- a break below the page still reports as a
+    break. `before_seq` is a keyset cursor: the lowest seq already held.
     """
     services = _services(request)
-    entries = services.audit.entries()
+
+    try:
+        page_size = max(1, min(int(limit), AUDIT_MAX_PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = AUDIT_PAGE_SIZE
+
+    cursor: int | None = None
+    if before_seq is not None:
+        try:
+            cursor = int(before_seq)
+        except (TypeError, ValueError):
+            cursor = None
+
+    entries = services.audit.recent(limit=page_size, before_seq=cursor)
+    # The whole chain, every time: integrity is never inferred from a page.
     bad_seq = services.audit.verify_chain()
+    total = services.audit.count()
+    oldest = services.audit.oldest_seq()
 
     rows = []
     for entry in entries:
@@ -1830,13 +1857,26 @@ def api_audit(request: Request) -> Response:
             }
         )
 
+    # Rows come back newest first, so the last one is the lowest seq on this
+    # page and therefore the cursor for the page below it.
+    lowest_seq = rows[-1]["seq"] if rows else None
+    has_more = bool(rows) and oldest is not None and lowest_seq is not None and lowest_seq > oldest
+
     return JSONResponse(
         {
             "rows": rows,
             "chain_ok": bad_seq is None,
             "first_bad_seq": bad_seq,
             "keyed": bool(services.audit.config.hmac_key),
-            "entries": len(entries),
+            # Rows on this page, and the size of the whole log. `entries`
+            # keeps its old meaning of "rows in this response"; `total` is
+            # what the chain banner counts as verified.
+            "entries": len(rows),
+            "total": total,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_before_seq": lowest_seq if has_more else None,
+            "oldest_seq": oldest,
         }
     )
 

@@ -43,6 +43,14 @@
   </p>
   <ol id="audit-timeline" class="timeline"></ol>
   <p id="audit-empty" class="muted empty-note" hidden></p>
+
+  {# Paging. The newest page loads with the document; older pages are
+     fetched on demand, because the whole log is five figures of rows on a
+     running deployment. "Verify chain" always checks every entry. #}
+  <div class="load-more" data-audit-paging hidden>
+    <button type="button" class="btn btn-quiet" data-audit-load-older>Load older</button>
+    <span class="muted small" data-audit-shown></span>
+  </div>
 </section>
 
 <details class="payload-details table-details">
