@@ -72,6 +72,8 @@ assertion disagrees with the record. See
 | `demo_seed.py` | seeds a few ledger rows through the validated ingest | paypal, paypal_write, executor, reader |
 | `facts.py` | trusted facts from the record | reader, paypal_write, executor |
 | `discrepancy.py` | compares claim with delivery assertion | the same, plus reader |
+| `carrier.py` | carrier lookups, reduced to enums | paypal, paypal_write, executor, store, reader, approval |
+| `evidence_pack.py` | the one-page evidence PDF from Facts | paypal_write, executor, reader, claim_form, orders |
 | `policy.py` | caps, clock, autonomy rules | reader, paypal_write, executor, any model client |
 | `approval.py` | explicit seller approval | paypal_write |
 | `audit.py` | hash-chained log | paypal_write |
@@ -362,6 +364,11 @@ secret is committed:
 | `AUDIT_HMAC_KEY` | keying the audit chain |
 | `LEDGER_API_KEY` | bearer token for `POST /api/orders` machine ingest; unset disables it |
 | `AG_GRID_LICENSE_KEY` | optional; without it the grid shows a watermark |
+| `CARRIER_ENABLED` | the carrier connector; **defaults to `false`** and off means nothing runs |
+| `CARRIER_API_PROVIDER` | `aftership` or `none` (default); an unknown name degrades to "unavailable" |
+| `CARRIER_API_KEY` | the aggregator key; sent in a header, never logged |
+| `CARRIER_TIMEOUT_SECONDS` | per-lookup timeout, default 10 |
+| `CARRIER_MAX_LOOKUPS_PER_HOUR` | deployment-wide ceiling, default 60, enforced in code |
 
 Set inline in the blueprint: `ORRIX_DB=/var/data/orrix.db`,
 `ORRIX_ENV=production`, `POLLER_ENABLED=true`,
@@ -387,13 +394,127 @@ development, so the verification path is unproven against real
 actually populated the queue. The poller runs every 60 seconds by default
 and makes the webhook an optimisation rather than a dependency.
 
+## The carrier connector
+
+Off by default, behind `CARRIER_ENABLED`. With the flag off no client is
+built, no lookup is attempted, no carrier fact is added, the case page shows
+no carrier card and approval ids are unchanged — there is a test that builds
+a case in a subprocess where importing `orrix.carrier` raises, and asserts
+the facts, the policy decision and the approval id are identical.
+
+When it is on, opening a case whose tracking number the **seller** supplied
+(through the ledger or their own form) looks that shipment up once. Tracking
+that exists only inside the PayPal record is not re-checked.
+
+A carrier response is treated as untrusted input, exactly like a buyer
+message. Four values survive the boundary:
+
+| Kept | Dropped |
+| --- | --- |
+| `status` — one of `delivered`, `in_transit`, `exception`, `not_found`, `unavailable` | checkpoint messages, locations, signatory names, courier notes, shipment titles, every other string |
+| `delivered_at` — a validated ISO timestamp, and only when the status is `delivered` | a delivery date on any other status |
+| `checked_at` — when Orrix asked | the provider's own narrative of when things happened |
+| `source` — the provider's name, pattern-checked | anything the provider says about itself |
+
+The two facts it can produce, `carrier_status` and `carrier_delivered_at`,
+carry the origin `carrier API` and a status of their own:
+**`carrier_reported`**. That status is deliberately *not* usable: it is
+absent from `USABLE_STATUSES`, so no payload, no policy rule and no action
+can rest on it. It is shown in its own colour and is never labelled
+"confirmed" or "verified".
+
+What it does and does not change:
+
+- **It does not change the evidence payload.** The fixed template has no
+  field for a carrier reading, so nothing was added to it. The body Orrix
+  sends is byte-identical with the connector on or off, and there is a test
+  comparing the two.
+- **It does not change the policy action set.** A carrier-reported delivery
+  against a not-received claim raises the existing discrepancy — the same
+  fixed sentence, "Claim conflicts with available delivery evidence. Review
+  required." — and the same review flag. It does not block approval: the
+  seller is still entitled to submit their evidence.
+- **It does bind the approval.** When the seller approves while a carrier
+  reading is on the page, the status and its check time are folded into the
+  approval id. A different or later reading at execution time refuses the
+  write with `stale_carrier`.
+
+Guards: a per-tracking-number cache with a one-hour TTL, a deployment-wide
+hourly cap enforced in code, up to three attempts with exponential backoff,
+and a 30-second per-case cooldown on the "Check carrier" button. Every
+failure mode — timeout, 4xx, 5xx, rate limit, unparseable body, unknown
+status, transport error — produces `unavailable` rather than an exception.
+
+### The adapter, and what was verified
+
+The one implemented adapter is **AfterShip**. From its current public
+documentation I verified: the host `api.aftership.com`, the dated path family
+`/tracking/{version}/trackings`, the `as-api-key` auth header, the documented
+`tag` vocabulary (`Pending`, `InfoReceived`, `InTransit`, `OutForDelivery`,
+`AttemptFail`, `Delivered`, `AvailableForPickup`, `Exception`, `Expired`),
+the `shipment_delivery_date` field and its three possible formats, and the
+per-endpoint rate limits — `GET /trackings/:id` at 5 requests/second, `GET
+/trackings` at 6, with `X-RateLimit-*` response headers.
+
+**What I could not verify:** the response envelope for the dated API
+versions is not publicly readable (the model and endpoint doc pages return
+403 without an account), and I found no documentation of a free tier or its
+quota. The parser therefore accepts the two plausible envelope shapes — the
+legacy `data.tracking` wrapper and a bare `data` object — and reports
+`unavailable` for anything matching neither, rather than guessing. **The
+adapter has never been run against the live API.** Treat the first real
+lookup as the thing that confirms the envelope; a wrong guess shows up as
+`unavailable`, not as a wrong delivery status.
+
+Setting `CARRIER_API_PROVIDER` to any other name yields a stub that reports
+`unavailable` for every lookup, so a misconfiguration degrades instead of
+failing at boot.
+
+## The evidence pack
+
+`GET /cases/<id>/evidence.pdf` renders a one-page PDF from Facts through a
+fixed layout: the dispute id, amount and reason from PayPal, the transaction
+id, the tracking facts with their origins and recorded times, the
+carrier-reported facts when they exist, a generated-at time, a SHA-256
+content hash printed on the page, and the footer *"Generated by Orrix from
+the facts listed above. Not verified by a carrier unless stated."*
+
+No buyer text, no Reader summary, no ledger free text and no item label
+reach it — the module imports none of those and names none of their fields,
+which is enforced by tests and by a boundary check.
+
+The output is deterministic: metadata dates come from the facts rather than
+the clock, and the facts are stamped from the dispute record's own
+`update_time`, so the same unchanged case always produces the same bytes and
+the same hash. The printed hash is the SHA-256 of the canonical content
+listed on the page, not of the PDF bytes, so it can be recomputed from the
+same facts without a PDF library. The content stream is left uncompressed on
+purpose, so anyone can check the "no untrusted text" claim with `strings` and
+a grep rather than trusting the tests.
+
+The route requires a session and serves `application/pdf` as an attachment
+with `no-store` and `X-Content-Type-Options: nosniff`. It makes no PayPal
+call and no carrier lookup.
+
 ## Known limitations
 
+- **`carrier_reported` is not verification of delivery to the buyer.** It is
+  one aggregator's reading of one tracking number. The number itself is still
+  something the seller supplied, so a carrier confirming "delivered" confirms
+  that *that parcel* was delivered somewhere — not that the buyer received
+  what they ordered. It is never promoted to `confirmed` and nothing acts on
+  it.
+- **The AfterShip adapter is untested against the live API.** The response
+  envelope for the dated versions could not be verified from public
+  documentation; see above. A mismatch yields `unavailable`.
+- **Attaching the evidence pack to the PayPal dispute is not implemented and
+  untested.** The PDF is a download for the seller. Nothing in the executor
+  or in any PayPal request changed, and no code path uploads a document.
 - **Seller tracking is asserted, not verified.** A seller can type any
   well-formed tracking number, by hand or through the ledger and its CSV/API
   ingest. Orrix marks it `seller_asserted`, never `confirmed`, and raises a
-  review flag when it contradicts the buyer — but nothing checks the number
-  with the carrier.
+  review flag when it contradicts the buyer. With the connector on, a carrier
+  reading can *support* it — as `carrier-reported`, with the caveat above.
 - **`delivered_date` may be ignored by PayPal.** It is included in the
   tracking entry because the evidence payload calls for a delivery date, but
   it is not a documented field on `provide-evidence`. PayPal may drop or

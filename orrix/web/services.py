@@ -12,7 +12,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from ..audit import AuditLog
+from ..audit import AuditLog, OriginTag
+from ..carrier import CarrierLookup, CarrierResult, build_client
 from ..config import AppConfig
 from ..executor import ExecutedApprovals, ExecutorDeps, build_writer
 from ..orders import OrderInput, OrderLedger, OrderRecord, match_for_facts
@@ -29,6 +30,11 @@ logger = logging.getLogger("orrix.web.services")
 #: repeated clicks.
 RERUN_COOLDOWN_SECONDS = 30
 
+#: Minimum seconds between two "Check carrier" presses for the same case.
+#: The per-number cache and the hourly cap already bound the cost; this stops
+#: one page from being leaned on.
+CARRIER_CHECK_COOLDOWN_SECONDS = 30
+
 
 class Services:
     """Assembled services. One instance per application."""
@@ -40,6 +46,7 @@ class Services:
         writer: Any | None = None,
         reader_client: Any | None = None,
         case_store: Any | None = None,
+        carrier_client: Any | None = None,
     ):
         self.config = config
         self.secure_cookies = config.use_secure_cookies
@@ -93,6 +100,26 @@ class Services:
         self.order_ledger = OrderLedger(config.db_path)
         self.order_limiter = LabRateLimiter(per_minute=config.ledger_max_per_minute)
 
+        # The carrier connector. With CARRIER_ENABLED off this builds a
+        # client that contacts nothing and always reports unavailable, and
+        # nothing on the case page asks it anything, so the deployment is
+        # indistinguishable from one without the module.
+        self.carrier_config = config.carrier_config()
+        self.carrier = CarrierLookup(
+            client=(
+                carrier_client
+                if carrier_client is not None
+                else build_client(self.carrier_config)
+            ),
+            config=self.carrier_config,
+        )
+        # The last carrier reading per dispute, and the last press of the
+        # button. Operator working state, like the Reader's re-run notice:
+        # an approval binds to the reading, it is not authority on its own.
+        self._carrier_results: dict[str, CarrierResult] = {}
+        self._carrier_attempts: dict[str, float] = {}
+        self._carrier_notices: dict[str, dict[str, Any]] = {}
+
         self.pipeline_deps = PipelineDeps(
             audit=self.audit,
             case_views=self.case_views,
@@ -133,7 +160,17 @@ class Services:
             )
         return self._writer
 
-    def executor_deps(self, seller_input: SellerEvidenceInput | None = None) -> ExecutorDeps:
+    def executor_deps(
+        self, seller_input: SellerEvidenceInput | None = None, dispute_id: str | None = None
+    ) -> ExecutorDeps:
+        """Deps for one execution, including the carrier reading on hand.
+
+        The carrier values are passed as two plain strings so the executor
+        never imports the connector. Both are None when no lookup has
+        produced a reported status for this dispute, which is always the
+        case with the flag off.
+        """
+        status, checked_at = self.carrier_binding_for(dispute_id)
         return ExecutorDeps(
             paypal_reader=self.paypal_reader,
             writer=self.writer,
@@ -142,6 +179,8 @@ class Services:
             policy_config=self.config.policy_config(),
             seller_input=seller_input,
             order_ledger=self.order_ledger,
+            carrier_status=status,
+            carrier_checked_at=checked_at,
         )
 
     # -- stored cases -----------------------------------------------------
@@ -417,6 +456,67 @@ class Services:
 
     def get_rerun_notice(self, dispute_id: str) -> dict[str, Any] | None:
         return self._rerun_notices.get(dispute_id)
+
+    # -- carrier connector -------------------------------------------------
+
+    @property
+    def carrier_enabled(self) -> bool:
+        return bool(self.carrier_config.enabled)
+
+    def carrier_check_ready(self, dispute_id: str) -> tuple[bool, int]:
+        """Whether a manual carrier check may proceed, and seconds to wait."""
+        last = self._carrier_attempts.get(dispute_id)
+        if last is None:
+            return True, 0
+        elapsed = time.time() - last
+        if elapsed >= CARRIER_CHECK_COOLDOWN_SECONDS:
+            return True, 0
+        return False, max(int(CARRIER_CHECK_COOLDOWN_SECONDS - elapsed), 1)
+
+    def record_carrier_check(self, dispute_id: str) -> None:
+        self._carrier_attempts[dispute_id] = time.time()
+
+    def get_carrier_result(self, dispute_id: str) -> CarrierResult | None:
+        return self._carrier_results.get(dispute_id)
+
+    def set_carrier_notice(self, dispute_id: str, notice: dict[str, Any]) -> None:
+        self._carrier_notices[dispute_id] = notice
+
+    def get_carrier_notice(self, dispute_id: str) -> dict[str, Any] | None:
+        return self._carrier_notices.get(dispute_id)
+
+    def carrier_binding_for(self, dispute_id: str | None) -> tuple[str | None, str | None]:
+        """The (status, checked_at) an approval on this case must bind to."""
+        if not dispute_id or not self.carrier_enabled:
+            return None, None
+        from ..carrier import carrier_binding
+
+        return carrier_binding(self._carrier_results.get(dispute_id))
+
+    def lookup_carrier(
+        self, dispute_id: str, carrier: Any, tracking_number: Any
+    ) -> CarrierResult | None:
+        """One lookup for one case, through the cache, cap and retries.
+
+        Returns None without touching anything when the connector is off, so
+        every caller can treat "off" as "there is no carrier information"
+        rather than having to special-case it.
+        """
+        if not self.carrier_enabled:
+            return None
+
+        result = self.carrier.lookup(carrier, tracking_number)
+        self._carrier_results[dispute_id] = result
+        # Status and provider only. The provider returns free text; none of
+        # it is here to log, because none of it was kept.
+        self.audit.append(
+            actor="admin",
+            action=f"web.carrier_lookup:{result.status.value}",
+            origin_tag=OriginTag.SYSTEM,
+            dispute_id=dispute_id,
+            payload={"status": result.status.value, "source": result.source},
+        )
+        return result
 
     # -- attack lab --------------------------------------------------------
 

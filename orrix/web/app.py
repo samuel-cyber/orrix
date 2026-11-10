@@ -15,7 +15,7 @@ import csv
 import hmac
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from io import StringIO
@@ -29,9 +29,12 @@ from pydantic import ValidationError
 
 from ..approval import ApprovalError, DisputeVersion, create_approval
 from ..audit import OriginTag, canonical_json, sha256_hex
+from ..carrier import CARRIER_DELIVERED_CODE, apply_carrier
+from ..discrepancy import detect_discrepancy
 from ..errors import host_of
+from ..evidence_pack import EvidencePackError, build_pack, render_pdf
 from ..executor import build_evidence_payload, execute
-from ..facts import FactStatus, build_facts
+from ..facts import CARRIER_STATUS, SOURCE_CARRIER_API, FactStatus, build_facts
 from ..evaluation import load_results
 from ..orders import (
     ITEM_LABEL_MAX_LENGTH,
@@ -54,7 +57,7 @@ from .security import (
     SECURITY_HEADERS,
     SESSION_COOKIE,
 )
-from .services import RERUN_COOLDOWN_SECONDS
+from .services import CARRIER_CHECK_COOLDOWN_SECONDS, RERUN_COOLDOWN_SECONDS
 
 logger = logging.getLogger("orrix.web")
 
@@ -74,6 +77,7 @@ ORIGIN_LABELS = {
     "paypal_record": "PayPal record",
     "seller_input": "Seller input",
     SOURCE_SELLER_LEDGER: "Seller ledger",
+    SOURCE_CARRIER_API: "Carrier API (reported, not verified)",
     "derived": "Orrix (derived)",
     "buyer_text": "Buyer text (untrusted, display only)",
 }
@@ -235,7 +239,157 @@ def _evidence_completeness(facts) -> str:
     return "no"
 
 
-def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
+def _pack_retrieved_at(snapshot: Mapping[str, Any]) -> datetime:
+    """The timestamp the evidence pack's facts are stamped with.
+
+    Taken from the dispute record rather than the clock, so downloading the
+    same unchanged case twice produces the same bytes and the same hash, and
+    so the digest shown on the page is the digest inside the file. A record
+    with no usable time falls back to a fixed epoch rather than to now().
+    """
+    for key in ("update_time", "create_time"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+    return datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def _pack_facts(request: Request, dispute_id: str, snapshot: Mapping[str, Any]):
+    """The Facts the evidence pack is built from, or None.
+
+    One function for both the page's hash and the download, so the two can
+    never disagree. It makes no carrier lookup: whatever reading is already
+    on hand is used, and nothing is spent.
+    """
+    services = _services(request)
+    try:
+        facts = build_facts(
+            snapshot,
+            seller_input=services.get_seller_input(dispute_id),
+            expected_dispute_id=dispute_id,
+            retrieved_at=_pack_retrieved_at(snapshot),
+        )
+    except ValueError:
+        return None
+
+    facts, _ = apply_matched(services.order_ledger, facts)
+    result = services.get_carrier_result(dispute_id) if services.carrier_enabled else None
+    if result is not None:
+        facts = apply_carrier(facts, result)
+    return facts
+
+
+def _carrier_support(facts) -> dict[str, Any] | None:
+    """The carrier_reported fact, for the readiness checklist, or None.
+
+    Only ever describes the fact as carrier-reported. It is listed as
+    *supporting* PROOF_OF_FULFILLMENT, which is not the same as satisfying
+    it: the payload is still built from the tracking facts alone.
+    """
+    if facts is None:
+        return None
+    fact = facts.facts.get(CARRIER_STATUS)
+    if fact is None or fact.status is not FactStatus.CARRIER_REPORTED:
+        return None
+    return {
+        "status": fact.value,
+        "label": "carrier-reported",
+        "origin": SOURCE_CARRIER_API,
+        "delivered": fact.value == CARRIER_DELIVERED_CODE,
+    }
+
+
+def _evidence_pack_hash(facts) -> str | None:
+    """The evidence pack's content hash, or None when no pack can be built."""
+    if facts is None:
+        return None
+    try:
+        return build_pack(facts).content_hash
+    except EvidencePackError:
+        return None
+
+
+def _carrier_tracking(facts, ledger_row, seller_input=None) -> tuple[str, str] | None:
+    """The (carrier, number) to look up, or None when there is nothing to ask.
+
+    A lookup happens only when the seller supplied the shipment -- through
+    the order ledger or through their own form. Tracking that exists only
+    inside the PayPal record is not re-checked: Orrix did not put it there
+    and the seller has not asked about it.
+
+    The question is who supplied the number, not what the resolved fact's
+    source ended up being. When the seller's entry and the PayPal record
+    agree, the fact is stamped `paypal_record` because it is corroborated --
+    but the seller did supply it, so a lookup is still in scope.
+    """
+    if facts is None:
+        return None
+
+    if ledger_row is not None:
+        pair = (ledger_row.carrier, ledger_row.tracking_number)
+    elif getattr(seller_input, "tracking_number", None):
+        pair = (getattr(seller_input, "carrier", None), seller_input.tracking_number)
+    else:
+        return None
+
+    if not all(isinstance(item, str) and item.strip() for item in pair):
+        return None
+    return pair[0].strip(), pair[1].strip()
+
+
+def _carrier_context(
+    request: Request,
+    dispute_id: str,
+    facts,
+    ledger_row,
+    seller_input=None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Everything the Carrier check card needs, or {} when the flag is off.
+
+    Returns an empty mapping when CARRIER_ENABLED is false, so the template
+    renders no card and every downstream branch is skipped. This is the one
+    place the console decides to spend a carrier lookup.
+
+    `force` is the "Check carrier" button: it bypasses the already-looked-up
+    check for this page load, but not the cache, the hourly cap or the
+    per-case cooldown, all of which live below this.
+    """
+    services = _services(request)
+    if not services.carrier_enabled:
+        return {}
+
+    tracking = _carrier_tracking(facts, ledger_row, seller_input)
+    result = services.get_carrier_result(dispute_id)
+
+    # Opening the page looks up once; afterwards the stored reading is
+    # shown until the seller asks for a fresh one.
+    if tracking is not None and (result is None or force):
+        result = services.lookup_carrier(dispute_id, *tracking)
+
+    return {
+        "enabled": True,
+        "provider": services.carrier.provider,
+        "result": result,
+        "status": result.status.value if result else None,
+        "delivered_at": result.delivered_at if result else None,
+        "checked_label": _display_timestamp(result.checked_at) if result else None,
+        "lookups_this_hour": services.carrier.lookups_this_hour(),
+        "cap": services.carrier_config.max_lookups_per_hour,
+        "has_tracking": tracking is not None,
+        "notice": services.get_carrier_notice(dispute_id),
+    }
+
+
+def _load_case(
+    request: Request, dispute_id: str, force_carrier: bool = False
+) -> dict[str, Any] | None:
     services = _services(request)
     snapshot = services.case_snapshot(dispute_id)
     if snapshot is None:
@@ -250,6 +404,29 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
     view = process_case(snapshot, services.pipeline_deps, seller_input=seller_input)
 
     facts = view.facts
+
+    # The ledger row this dispute's seller transaction matches, if any. Read
+    # before the carrier step because it is what supplies the tracking
+    # number a lookup would use. A pure read; the approval is what binds to
+    # the row and its version.
+    ledger_row = match_for_facts(services.order_ledger, facts)
+
+    # The carrier connector. Lazy by construction: this runs when a case page
+    # is opened, never on a poll, and only when the seller's ledger or the
+    # seller's own form supplied a tracking number. The lookup goes through a
+    # per-number cache and an hourly cap, so re-opening a case is free. With
+    # CARRIER_ENABLED off this is an empty mapping and nothing below it runs.
+    carrier = _carrier_context(
+        request, dispute_id, facts, ledger_row, seller_input, force=force_carrier
+    )
+    if carrier.get("result") is not None and facts is not None:
+        facts = apply_carrier(facts, carrier["result"])
+        # The carrier may raise the same fixed discrepancy sentence a seller
+        # assertion raises, and nothing else. The policy decision is
+        # deliberately *not* recomputed: the action set a carrier reading
+        # produces is the action set it produced without one.
+        view = replace(view, facts=facts, discrepancy=detect_discrepancy(facts))
+
     payload = None
     payload_error = None
     if facts is not None:
@@ -272,10 +449,7 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
             )
         fact_rows.sort(key=lambda row: row["name"])
 
-    # The ledger row this dispute's seller transaction matches, if any, and a
-    # read-only readiness view of it. Both are pure reads; the approval is
-    # what binds to the row and its version.
-    ledger_row = match_for_facts(services.order_ledger, facts)
+    # A read-only readiness view of the matched row.
     ledger_checklist = (
         evidence_checklist(facts, ledger_row, snapshot.get("create_time"))
         if facts is not None
@@ -311,6 +485,17 @@ def _load_case(request: Request, dispute_id: str) -> dict[str, Any] | None:
         "reader_started_label": _display_timestamp(view.reader_started_at),
         "reader_finished_label": _display_timestamp(view.reader_finished_at),
         "rerun_notice": services.get_rerun_notice(dispute_id),
+        # Empty mapping when CARRIER_ENABLED is off, which is what the
+        # template tests to decide whether the card exists at all.
+        "carrier": carrier,
+        # The evidence pack's hash, shown beside the download button. Built
+        # from the same facts the PDF is built from, so the number on the
+        # page is the number inside the file.
+        "evidence_pack_hash": _evidence_pack_hash(_pack_facts(request, dispute_id, snapshot)),
+        # Shown in the readiness checklist as supporting evidence, labelled
+        # "carrier-reported" and never "verified". Present only when a
+        # carrier_reported fact actually exists.
+        "carrier_support": _carrier_support(facts),
     }
 
 
@@ -1162,6 +1347,150 @@ def case_page(request: Request, dispute_id: str) -> Response:
     return templates.TemplateResponse(request, "case.html", _context(request, **case))
 
 
+@router.get("/cases/{dispute_id}/evidence.pdf")
+def evidence_pack_pdf(request: Request, dispute_id: str) -> Response:
+    """The one-page evidence pack, built from Facts through a fixed layout.
+
+    Session-guarded like every other case route. Served uncached, as an
+    attachment, with nosniff: it is a generated document, not a page, and
+    nothing about it should be stored by an intermediary.
+
+    This route makes no PayPal call and changes nothing. Attaching the file
+    to the dispute itself is not implemented; see the README.
+    """
+    services = _services(request)
+    snapshot = services.case_snapshot(dispute_id)
+    if snapshot is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    # Built through the same helper the page's hash uses, so the digest shown
+    # beside the button is always the digest inside the file. No carrier
+    # lookup: a download must not be a way to spend the carrier budget.
+    facts = _pack_facts(request, dispute_id, snapshot)
+    if facts is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    try:
+        pdf_bytes, content_hash = render_pdf(facts)
+    except EvidencePackError as error:
+        logger.warning("evidence pack unavailable dispute_id=%s: %s", dispute_id, error)
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    services.audit.append(
+        actor="admin",
+        action="web.evidence_pack_downloaded",
+        origin_tag=OriginTag.SYSTEM,
+        dispute_id=dispute_id,
+        payload=content_hash,
+    )
+
+    filename = f"orrix-evidence-{dispute_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, private",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            # The hash is in the file; repeating it in a header lets a
+            # script check the download without parsing the PDF.
+            "X-Orrix-Content-Hash": content_hash,
+        },
+    )
+
+
+@router.post("/cases/{dispute_id}/check-carrier", response_class=HTMLResponse)
+def check_carrier(request: Request, dispute_id: str, csrf_token: str = Form("")) -> Response:
+    """Ask the carrier for a fresh reading on this case.
+
+    Refused when the connector is off, when there is no seller-supplied
+    tracking number to ask about, or when this case was checked less than
+    CARRIER_CHECK_COOLDOWN_SECONDS ago. Every refusal is a notice on the
+    page, never an exception.
+    """
+    if not _csrf_ok(request, csrf_token):
+        return _csrf_failure(request)
+
+    services = _services(request)
+    snapshot = services.case_snapshot(dispute_id)
+    if snapshot is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    if not services.carrier_enabled:
+        # Nothing to audit and nothing to spend: the connector is off.
+        services.set_carrier_notice(
+            dispute_id,
+            {
+                "status": "disabled",
+                "message": "The carrier connector is off. Set CARRIER_ENABLED to use it.",
+            },
+        )
+        return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+    allowed, retry_after = services.carrier_check_ready(dispute_id)
+    if not allowed:
+        services.set_carrier_notice(
+            dispute_id,
+            {
+                "status": "rate_limited",
+                "message": (
+                    f"A carrier check is limited to once every "
+                    f"{CARRIER_CHECK_COOLDOWN_SECONDS} seconds for a case. "
+                    f"Try again in {retry_after}s."
+                ),
+            },
+        )
+        services.audit.append(
+            actor="admin",
+            action="web.carrier_check_refused:rate_limited",
+            origin_tag=OriginTag.SYSTEM,
+            dispute_id=dispute_id,
+            payload=None,
+        )
+        return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+    services.record_carrier_check(dispute_id)
+    case = _load_case(request, dispute_id, force_carrier=True)
+    if case is None:
+        return templates.TemplateResponse(
+            request, "not_found.html", _context(request, dispute_id=dispute_id), status_code=404
+        )
+
+    carrier = case.get("carrier") or {}
+    if not carrier.get("has_tracking"):
+        services.set_carrier_notice(
+            dispute_id,
+            {
+                "status": "no_tracking",
+                "message": (
+                    "No seller-supplied tracking number on this case, so there is "
+                    "nothing to look up. Add the order to the ledger or enter "
+                    "tracking above."
+                ),
+            },
+        )
+        return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+    status = carrier.get("status") or "unavailable"
+    services.set_carrier_notice(
+        dispute_id,
+        {
+            "status": status,
+            "message": f"Carrier reported: {status.replace('_', ' ')}.",
+        },
+    )
+    return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
+
+
 @router.post("/cases/{dispute_id}/seller-input", response_class=HTMLResponse)
 def submit_seller_input(
     request: Request,
@@ -1269,6 +1598,12 @@ def approve(
         )
         return RedirectResponse(f"/cases/{dispute_id}", status_code=303)
 
+    # The carrier reading the seller was looking at, if any. Bound into the
+    # approval id, so a different reading at execution time refuses the
+    # write. Both None whenever the connector is off, which leaves the id
+    # exactly what it was before the connector existed.
+    carrier_status, carrier_checked_at = services.carrier_binding_for(dispute_id)
+
     try:
         approval = create_approval(
             dispute_id=dispute_id,
@@ -1277,6 +1612,8 @@ def approve(
             dispute_version=current,
             ledger_row_id=ledger_row.row_id if ledger_row else None,
             ledger_row_version=ledger_row.version if ledger_row else None,
+            carrier_status=carrier_status,
+            carrier_checked_at=carrier_checked_at,
         )
     except ApprovalError as error:
         services.set_result(
@@ -1292,7 +1629,9 @@ def approve(
         payload=approval.approval_id,
     )
 
-    result = execute(approval, services.executor_deps(seller_input=seller_input))
+    result = execute(
+        approval, services.executor_deps(seller_input=seller_input, dispute_id=dispute_id)
+    )
 
     confirmation = services.case_snapshot(dispute_id)
     services.set_result(
@@ -1402,6 +1741,11 @@ def _result_message(result) -> str:
         return (
             "The dispute changed between approval and execution. Nothing was sent. "
             "Review the updated case and approve again."
+        )
+    if result.reason == "stale_carrier":
+        return (
+            "The carrier reading changed between approval and execution. Nothing was "
+            "sent. Review the updated case and approve again."
         )
     if result.status == "unconfirmed":
         return "The write returned success but the evidence was not found on re-fetch."

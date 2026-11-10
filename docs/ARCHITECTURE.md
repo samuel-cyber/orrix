@@ -42,11 +42,12 @@ read_claim ────────────┘                           │
                                         1. re-fetch
                                         2. version still matches?
                                         3. ledger row still at id+version?
-                                        4. fresh policy still permits?
-                                        5. payload == Facts' payload?
-                                        6. claim approval id
-                                        7. write via paypal_write
-                                        8. re-fetch, confirm it landed
+                                        4. carrier reading unchanged?
+                                        5. fresh policy still permits?
+                                        6. payload == Facts' payload?
+                                        7. claim approval id
+                                        8. write via paypal_write
+                                        9. re-fetch, confirm it landed
 ```
 
 Every step appends to the hash-chained audit log with an origin tag
@@ -70,7 +71,9 @@ text.
 | `seller_input.py` | the only schema seller shipment data may fill |
 | `orders.py` | the seller's order ledger: validated rows, idempotent upsert, match to a dispute, facts overlay |
 | `demo_seed.py` | seeds a few ledger rows through the validated ingest |
-| `discrepancy.py` | one fixed sentence when the claim and the delivery assertion conflict |
+| `discrepancy.py` | one fixed sentence when the claim and the delivery evidence conflict |
+| `carrier.py` | optional carrier lookups, reduced to five status enums; off by default |
+| `evidence_pack.py` | the one-page evidence PDF, built from Facts through a fixed layout |
 | `policy.py` | caps, clock, autonomy rules; plain code |
 | `approval.py` | immutable approval bound to a dispute version and, when a ledger row was used, to that row's id and version |
 | `executor.py` | the only writer; the only importer of `paypal_write` |
@@ -92,6 +95,7 @@ and no untrusted string reaches a payload.
 | Zone | Contents | May reach |
 | --- | --- | --- |
 | untrusted | buyer messages, buyer evidence notes, model output | `ClaimForm` only |
+| untrusted, third party | carrier API responses | Facts as `carrier_reported`, via five enums and two validated timestamps; every free-text field dropped |
 | first-party, unverified | seller shipment form; seller order ledger rows | Facts as `seller_asserted` (`seller_ledger` origin for ledger rows) |
 | trusted record | PayPal `get_dispute` response | Facts as `confirmed` |
 | derived | facts, discrepancy, policy decision, evidence checklist | the console, the approval |
@@ -130,7 +134,14 @@ The separation is checked, not just described.
 - `orders.py` or `demo_seed.py` imports `paypal`, `paypal_write`, `executor`
   or the reader, or reads a credential;
 - a web template carries an inline script or style, or a web asset assigns
-  data to `innerHTML` or calls `eval`.
+  data to `innerHTML` or calls `eval`;
+- `carrier.py` imports `paypal`, `paypal_write`, `executor`, `store`, the
+  reader or `approval`, or reads a credential;
+- `CarrierResult` grows a field that could hold free text;
+- `evidence_pack.py` names a prose-carrying field;
+- any core module (`facts`, `policy`, `approval`, `executor`,
+  `discrepancy`, `config`, `pipeline`, `reader`) imports `carrier` at module
+  scope — which would break the guarantee that the connector can be deleted.
 
 ## The order ledger
 
@@ -161,3 +172,65 @@ Ingest paths: the session-guarded `/orders` form and CSV import, and the
 public `POST /api/orders` machine route. The machine route is authenticated by
 its own bearer token (`LEDGER_API_KEY`, constant-time, rate-limited per
 minute); with no token set it is disabled. It never accepts `recorded_at`.
+
+## The carrier connector
+
+Optional, behind `CARRIER_ENABLED`, default off. It sits beside the ledger
+rather than inside the trusted core, and the dependency runs one way only:
+`carrier.py` imports `facts.py`, and nothing in the core imports
+`carrier.py`. `config.py` builds a `CarrierConfig` through a function-scope
+import for exactly this reason, so that deleting `orrix/carrier.py` leaves
+facts, policy, approval and the executor building identically. That is
+asserted by a subprocess test in which importing the module raises.
+
+```
+  case page opened ──> seller-supplied tracking? ──no──> nothing happens
+            │                     │yes
+            │                     v
+            │        CarrierLookup: cache -> hourly cap -> retries (max 3)
+            │                     │
+            │                     v
+            │            CarrierResult(status, delivered_at,
+            │                          checked_at, source)
+            │                     │
+            │                     v
+            └──> apply_carrier(facts, result)  adds carrier_status and
+                                               carrier_delivered_at only;
+                                               never touches a core fact
+```
+
+The two names it adds are held in `CARRIER_FACT_NAMES`, deliberately outside
+`FACT_NAMES`, so `build_facts` never populates them and a case with no
+lookup carries exactly the facts it carried before the connector existed.
+Their status, `carrier_reported`, is absent from `USABLE_STATUSES`: the
+payload builder, the policy rules and the executor cannot read it.
+
+The connector never reaches the Reader, never changes the action set and
+never changes the evidence payload — the fixed template has no field for a
+carrier reading, so none was added. Its one effect on the decision path is
+that `detect_discrepancy` also fires on a carrier-reported delivery, with
+the same fixed sentence and the same review flag.
+
+An approval granted while a reading was on the page folds that reading's
+status and check time into the approval id. The executor compares them
+against two plain strings on `ExecutorDeps` — not a carrier object, so the
+executor imports nothing from the connector — and refuses with
+`stale_carrier` if either moved.
+
+## The evidence pack
+
+`evidence_pack.py` renders a one-page PDF from Facts alone. It imports
+neither the reader, the claim form, the order ledger nor the pipeline, and
+names no prose-carrying field, so there is no path by which buyer text, a
+Reader summary or a ledger item label could reach a document a seller may
+forward to PayPal or a bank.
+
+Output is deterministic: PDF metadata dates come from the facts, and the web
+layer stamps those facts from the dispute record's own `update_time`, so the
+hash shown on the page is always the hash inside the file. The printed digest
+is a SHA-256 over the pack's canonical content, not over the PDF bytes, so it
+can be recomputed without a PDF library. The content stream is uncompressed
+so the "no untrusted text" property is checkable with `grep`.
+
+Nothing about the pack touches the executor or any PayPal request. Attaching
+it to the dispute is not implemented.

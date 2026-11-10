@@ -18,6 +18,10 @@ dependencies = [
     "python-dotenv",
     "jinja2",
     "python-multipart",
+    # Evidence pack PDFs. Pure Python, pinned: the pack's content hash is a
+    # promise of byte-identical output for the same facts, and a renderer
+    # that drifts between versions would break that.
+    "fpdf2==2.8.5",
 ]
 
 [project.optional-dependencies]

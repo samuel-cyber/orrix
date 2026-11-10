@@ -121,6 +121,17 @@ class AppConfig:
     # A placeholder is shown when it is unset. Not a secret.
     site_repo_url: str = "https://github.com/example/orrix"
 
+    # -- carrier connector -----------------------------------------------
+    # Off by default. With carrier_enabled false no client is built, no
+    # lookup is attempted, no carrier fact is added and the console shows no
+    # carrier card, so the deployment behaves exactly as it did before the
+    # connector existed.
+    carrier_enabled: bool = False
+    carrier_api_provider: str = "none"
+    carrier_api_key: str | None = field(default=None, repr=False)
+    carrier_timeout_seconds: float = 10.0
+    carrier_max_lookups_per_hour: int = 60
+
     reader_api_key: str | None = field(default=None, repr=False)
     reader_base_url: str = "https://api.openai.com/v1"
     reader_model: str = "gpt-4o-mini"
@@ -187,6 +198,9 @@ class AppConfig:
             f"login_max_failures={self.login_max_failures}",
             f"lab_daily_cap={self.lab_daily_cap}",
             f"ledger_api_key_set={self.ledger_api_key_is_set}",
+            f"carrier_enabled={self.carrier_enabled}",
+            f"carrier_api_provider={self.carrier_api_provider}",
+            f"carrier_api_key_set={self.carrier_api_key_is_set}",
         ]
 
     # -- derived service configs -----------------------------------------
@@ -203,8 +217,32 @@ class AppConfig:
     def reader_is_configured(self) -> bool:
         return bool(self.reader_api_key)
 
+    @property
+    def carrier_api_key_is_set(self) -> bool:
+        return bool(self.carrier_api_key)
+
     def audit_config(self) -> AuditConfig:
         return AuditConfig(db_path=self.db_path, hmac_key=self.audit_hmac_key)
+
+    def carrier_config(self):
+        """Settings for the carrier connector.
+
+        orrix.carrier is imported here rather than at module scope on
+        purpose: nothing in the trusted core -- facts, policy, approval, the
+        executor -- may depend on the connector existing, and keeping this
+        module free of a top-level import means a deployment with the flag
+        off is identical to one with the module deleted. See the carrier
+        flag-off test.
+        """
+        from .carrier import CarrierConfig
+
+        return CarrierConfig(
+            enabled=self.carrier_enabled,
+            provider=self.carrier_api_provider,
+            api_key=self.carrier_api_key,
+            timeout_seconds=self.carrier_timeout_seconds,
+            max_lookups_per_hour=self.carrier_max_lookups_per_hour,
+        )
 
     def policy_config(self) -> PolicyConfig:
         return PolicyConfig(
@@ -261,6 +299,11 @@ def load_config() -> AppConfig:
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),
         site_repo_url=os.environ.get("SITE_REPO_URL", "https://github.com/example/orrix"),
+        carrier_enabled=_flag("CARRIER_ENABLED", False),
+        carrier_api_provider=os.environ.get("CARRIER_API_PROVIDER", "none"),
+        carrier_api_key=os.environ.get("CARRIER_API_KEY"),
+        carrier_timeout_seconds=_number("CARRIER_TIMEOUT_SECONDS", 10.0),
+        carrier_max_lookups_per_hour=int(_number("CARRIER_MAX_LOOKUPS_PER_HOUR", 60)),
         reader_api_key=os.environ.get("READER_API_KEY"),
         reader_base_url=os.environ.get("READER_BASE_URL", "https://api.openai.com/v1"),
         reader_model=os.environ.get("READER_MODEL", "gpt-4o-mini"),

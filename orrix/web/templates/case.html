@@ -241,6 +241,86 @@
 </div>
 
 <div class="columns">
+  {% if carrier and carrier.enabled %}
+  <section class="card">
+    <h2>Carrier check</h2>
+    <p class="section-note">
+      <span class="origin origin-carrier">{{ origin_labels["carrier API"] }}</span>
+      A third party's reading of the shipment. Not proof of delivery to the buyer.
+    </p>
+
+    <dl class="kv">
+      <dt>Status</dt>
+      <dd>
+        {% if carrier.status %}
+        <span class="chip chip-carrier_reported">{{ carrier.status.replace('_', ' ') }}</span>
+        {% else %}
+        <span class="chip chip-unavailable">not checked</span>
+        {% endif %}
+      </dd>
+      <dt>Checked</dt>
+      <dd>
+        {% if carrier.checked_label %}
+        <span class="mono">{{ carrier.checked_label }}</span>
+        {% else %}
+        <span class="muted">never</span>
+        {% endif %}
+      </dd>
+      {% if carrier.delivered_at %}
+      <dt>Delivered at</dt>
+      <dd><span class="mono">{{ carrier.delivered_at }}</span></dd>
+      {% endif %}
+      <dt>Provider</dt>
+      <dd><span class="mono">{{ carrier.provider }}</span></dd>
+      <dt>Lookups</dt>
+      <dd><span class="mono">{{ carrier.lookups_this_hour }} / {{ carrier.cap }}</span> this hour</dd>
+    </dl>
+
+    <form method="post" action="/cases/{{ dispute_id }}/check-carrier" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-quiet" {% if not carrier.has_tracking %}disabled{% endif %}>
+        Check carrier
+      </button>
+    </form>
+    {% if not carrier.has_tracking %}
+    <p class="muted small">
+      No seller-supplied tracking number on this case, so there is nothing to look up.
+    </p>
+    {% endif %}
+    {% if carrier.notice %}
+    <p class="muted small">{{ carrier.notice.message }}</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>Evidence pack</h2>
+    <p class="section-note">
+      <span class="origin origin-derived">{{ origin_labels["derived"] }}</span>
+      A one-page PDF built from the facts above by a fixed layout.
+    </p>
+
+    {% if evidence_pack_hash %}
+    <p class="muted small">
+      Contains the dispute, the tracking facts with their origins and timestamps, and
+      the carrier reading when one exists. It carries no buyer text, no Reader summary
+      and no item label.
+    </p>
+    <a class="btn btn-quiet" href="/cases/{{ dispute_id }}/evidence.pdf" download>
+      Download evidence pack
+    </a>
+    <p class="muted small mono">sha256 {{ evidence_pack_hash[:16] }}&hellip;</p>
+    <p class="muted small">
+      The same digest is printed inside the document. The same facts always produce
+      the same file, so the hash can be re-checked later.
+    </p>
+    {% else %}
+    <p class="muted">No pack can be built: this case has no usable facts yet.</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="columns">
   <section class="card">
     <h2>Seller input</h2>
     <p class="section-note">
@@ -327,6 +407,17 @@
         <span><strong>No ledger match</strong> add this order on the Orders page to bind the approval to a versioned ledger row.</span>
         {% endif %}
       </li>
+      {% if carrier_support %}
+      <li>
+        <svg class="check-icon check-carrier" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M6.5 10.5l2.5 2.5 4.5-5"/></svg>
+        <span>
+          <strong>Carrier-reported</strong> supports PROOF_OF_FULFILLMENT:
+          the carrier reports <span class="mono">{{ carrier_support.status }}</span>.
+          This is carrier-reported, not verified, and it does not confirm delivery
+          to the buyer.
+        </span>
+      </li>
+      {% endif %}
     </ul>
 
     <details class="payload-details">

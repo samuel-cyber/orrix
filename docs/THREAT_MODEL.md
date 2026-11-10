@@ -27,6 +27,7 @@ What an attacker would want, in rough order of how much damage losing it does.
 | Zone | Contents | Allowed to reach |
 | --- | --- | --- |
 | Untrusted | buyer messages, buyer evidence notes, model output | the `ClaimForm` schema, and nothing else |
+| Untrusted, third party | carrier API responses (off unless `CARRIER_ENABLED`) | two Facts, as `carrier_reported`: five status enums and two validated timestamps; every free-text field dropped at the boundary |
 | First-party, unverified | the seller's shipment form; seller order ledger rows (form, CSV, `/api/orders`) | Facts, as `seller_asserted` (`seller_ledger` origin for ledger rows) |
 | Trusted record | the PayPal `get_dispute` response | Facts, as `confirmed` |
 | Derived | Facts, discrepancy, policy decision | the console and an approval |
@@ -40,6 +41,8 @@ What an attacker would want, in rough order of how much damage losing it does.
 | `reader.py` | buyer text, the amount ceiling | nothing | reach PayPal, the store, or an approval |
 | `claim_form.py` | reader output | nothing | reach anything privileged |
 | `seller_input.py` | a submitted form | nothing | reach PayPal or the reader |
+| `carrier.py` | a provider's JSON body | nothing | reach PayPal, the store, the reader or an approval; keep a free-text field; promote a reading to `confirmed` |
+| `evidence_pack.py` | allowlisted Facts | a PDF handed to the operator | read buyer text, model output, a ledger item label, or make any network call |
 | `orders.py` | submitted ledger rows, the record's transaction id | the `orders` table | reach PayPal, the reader or an approval; invent a fact |
 | `facts.py` | the record, validated seller input, a matching ledger row | nothing | read buyer prose or model output |
 | `policy.py` | Facts, a reader result, case state | nothing | consult a model; emit a money-moving action |
@@ -57,6 +60,7 @@ What an attacker would want, in rough order of how much damage losing it does.
 | Seller order ledger row | first-party, unverified | Facts, `status: seller_asserted`, origin `seller_ledger` |
 | Buyer message and evidence notes | untrusted | the `ClaimForm` schema, nothing else |
 | Model output | untrusted | a validated `ClaimForm`, nothing else |
+| Carrier API response | untrusted (a third party relaying what a shipper typed) | two Facts, `status: carrier_reported`, origin `carrier API`; never `confirmed`, never usable, never in a payload |
 
 "Trusted" means *trusted to be what PayPal recorded*, not trusted to be true.
 A buyer's claim is faithfully recorded and still may be wrong; so may a
@@ -82,15 +86,19 @@ text.
 
 **Acting without authority.** Only an `Approval` authorises a write.
 `approval_id` is the hash of `(dispute_id, action, payload, dispute_version)`
-plus, when a ledger row was used, the row's id and version, so an approval
-cannot be retargeted, edited or re-dated. The reader and investigator cannot
+plus, when a ledger row was used, the row's id and version, plus, when a
+carrier reading was on the page, that reading's status and check time -- so an
+approval cannot be retargeted, edited or re-dated. The reader and investigator cannot
 reach `create_approval`.
 
 **Acting on stale state.** The executor re-fetches, requires `update_time` and
 `status` to equal the approved version, requires the ledger row to still stand
-at the approved id and version (`stale_ledger` otherwise), re-runs policy
-against the fresh record, and requires the approved payload to equal what
-Facts produce now.
+at the approved id and version (`stale_ledger` otherwise), requires any
+carrier reading the approval was bound to to still be the reading on hand
+(`stale_carrier` otherwise), re-runs policy against the fresh record, and
+requires the approved payload to equal what Facts produce now. The carrier
+check compares two plain strings supplied by the caller: the executor makes
+no carrier call and imports nothing from the connector.
 
 **A forged or edited order row.** The ledger is first-party but still untrusted
 text. A row is validated field by field (no free text, conservative patterns),
@@ -108,9 +116,20 @@ sent as `PayPal-Request-Id`.
 no refund, accept-claim or make-offer code path; `refund_cap_usd` defaults to
 0 and raising it grants nothing.
 
-**Accusation.** The discrepancy detector emits one fixed sentence plus the two
+**Accusation.** The discrepancy detector emits one fixed sentence plus the
 facts and their sources. It never says a buyer is lying and never infers
-intent.
+intent. The wording does not change when a carrier is the source of the
+conflict: a carrier agreeing with the seller is more evidence, not a stronger
+allegation, and it does not block the submission either way.
+
+**A third party's reading becoming proof.** A carrier response may fill two
+Facts and nothing else, stamped `carrier_reported` -- a status deliberately
+absent from `USABLE_STATUSES`, so no payload, policy rule or action can rest
+on it. The evidence payload is unchanged by it: the fixed template has no
+carrier field, and a test asserts the body is identical with the connector on
+and off. The whole connector is off by default, and a test builds a case in a
+subprocess where importing `orrix.carrier` raises to prove the facts, the
+decision and the approval id are identical to a run without the module.
 
 ## The audit log: tamper-evident, not tamper-proof
 
@@ -214,9 +233,69 @@ code and checked by a test, not left to review.
 | No secret reaches a log or a config repr | `test_startup_logging_prints_no_secret` |
 | The suite never opens the operational database | `tests/test_no_real_db.py` |
 | Errored evaluation runs count in nothing | `tests/test_errored_runs.py` |
+| With the carrier off, facts, decision and approval id equal a run with `orrix/carrier.py` unimportable | `tests/test_carrier_flag_off.py` |
+| Every documented provider tag maps to an enum; an unknown tag is `unavailable` | `tests/test_carrier.py` |
+| Every failure mode — timeout, 4xx, 5xx, 429, bad JSON, transport error — yields `unavailable` | `test_every_error_status_yields_unavailable` and neighbours |
+| A cache hit avoids a second call; the hourly cap holds; the window slides | `test_a_cache_hit_avoids_a_second_call`, `test_the_hourly_cap_is_enforced_in_code` |
+| A carrier reading changes neither the action set nor the payload | `test_the_carrier_never_changes_the_action_set`, `test_the_payload_is_identical_with_and_without_a_carrier_reading` |
+| An approval is invalidated when the reading moves | `test_the_executor_refuses_when_the_reading_moved` |
+| Injection text in every carrier field reaches no fact, page, payload or PDF | `tests/test_carrier_web.py`, `tests/test_evidence_pack.py` |
+| The carrier key and the full provider URL appear in no page or log | `test_no_log_line_carries_the_key_or_a_full_url`, `test_the_page_never_carries_the_carrier_key` |
+| The PDF carries no buyer text, Reader summary or ledger item label | `tests/test_evidence_pack.py` |
+| The printed hash is the SHA-256 of the canonical content, and output is byte-stable | `test_the_printed_hash_is_the_sha256_of_the_canonical_content`, `test_the_same_facts_produce_identical_bytes_across_two_runs` |
 
 What no test proves: that the webhook signature path works against a real
-PayPal-signed event. See the note in the README.
+PayPal-signed event, and that the AfterShip adapter parses a real response —
+its envelope could not be verified from public documentation and it has never
+been run against the live API. See the notes in the README.
+
+## New surfaces: the carrier connector and the evidence pack
+
+### A carrier API response is untrusted input
+
+A tracking aggregator is a third party relaying strings a shipper typed into
+a label system. Treating its JSON as trustworthy because it arrived over TLS
+from a company with a support contract would be the same mistake as trusting
+a buyer message because PayPal relayed it.
+
+So the response is handled exactly like buyer text, with one difference: it
+may fill two Facts rather than a `ClaimForm`. What crosses the boundary is a
+status drawn from five enums, a delivery timestamp that must match a pattern
+and may only accompany a `delivered` status, the time of the check, and a
+pattern-checked provider name. The parser visits two keys — the status tag
+and the delivery date — and never looks at checkpoints, locations, signatory
+names, courier notes or titles, so there is nothing to sanitise later.
+
+| Attack | Why it fails |
+| --- | --- |
+| Injection text in every response field | Only two keys are read; the rest are never visited. Tests assert the string appears nowhere in the result, the page, the payload or the PDF. |
+| Injection text in the *status* field | The tag is matched against a fixed table. An unrecognised value is `unavailable`, never a guess. |
+| A forged `delivered` with a hostile timestamp | The timestamp must match a pattern or it is dropped; the status still cannot reach a payload. |
+| A reading that would unlock an action | `carrier_reported` is absent from `USABLE_STATUSES`. No policy rule reads it; the action set is identical whatever the carrier says. |
+| A reading swapped between approval and execution | Status and check time are folded into the approval id; the executor refuses with `stale_carrier`. |
+| A provider used to pump cost | Per-number cache with a TTL, a deployment-wide hourly cap enforced in code, max three attempts, and a 30-second per-case cooldown on the button. |
+| A hostile value smuggled into the request URL | Carrier and number must match a strict pattern with no spaces, slashes or query characters before a request is built. |
+| A key leaked through a log or a page | The key travels in a header, is `repr=False` in config, and log lines carry only the host and a status code. Tests assert the key and the full URL appear in neither. |
+
+The connector is off by default, and off means inert: no client, no lookup,
+no fact, no card, and an approval id identical to one computed with
+`orrix/carrier.py` deleted from the import path.
+
+### The PDF is a generation surface, not a parsing one
+
+Orrix writes PDFs; it never reads one. There is no document parser in the
+trust boundary, so the usual PDF attack surface does not apply.
+
+The risk runs the other way: a document a seller forwards to PayPal or a bank
+would be an excellent laundering route for untrusted text. The pack is
+therefore built from an allowlist of named facts through a fixed layout, and
+`evidence_pack.py` imports neither the reader, the claim form, the ledger nor
+the pipeline. The content stream is left uncompressed so the claim is
+checkable with `grep` rather than only by its tests.
+
+The route is session-guarded, serves `no-store` with `nosniff`, makes no
+PayPal call and makes no carrier lookup, so a download cannot be used to
+spend the carrier budget.
 
 ## Residual risks
 
@@ -240,29 +319,50 @@ Ordered by how much they should worry an operator.
    tracking number — by hand, through a ledger CSV import, or through the
    bearer-gated `POST /api/orders` ingest — and Orrix will submit it. It is
    marked `seller_asserted` (`seller_ledger` when it came from the ledger) and
-   a contradiction raises a review flag, but nothing contacts the carrier.
-   Orrix is relaying a claim on the seller's behalf.
-6. **Session theft.** The cookie is `HttpOnly`, `SameSite=Lax` and `Secure`
+   a contradiction raises a review flag. With the carrier connector on, a
+   lookup can *support* the number as `carrier_reported` — but see the next
+   item. Orrix is relaying a claim on the seller's behalf.
+6. **`carrier_reported` is not verification of delivery to the buyer.** This
+   is the most likely thing to be over-read, so it is stated plainly. A
+   carrier confirming `delivered` says that the parcel bearing *that tracking
+   number* was delivered to *some* address, as recorded by a courier and
+   relayed by an aggregator. It does not establish that the number belongs to
+   this order, that the address was the buyer's, or that the contents were
+   what was ordered — the number itself is still something the seller
+   supplied. Orrix never promotes it to `confirmed`, never lets it unlock an
+   action, and never labels it "verified". An operator who treats a teal
+   "carrier-reported" chip as proof of delivery has drawn a conclusion the
+   system did not.
+7. **The AfterShip adapter is unproven against the live API.** Its response
+   envelope could not be verified from public documentation and the adapter
+   has never been run against the real service. A mismatch degrades to
+   `unavailable`, which is the safe direction, but it means "no reading" may
+   mean "the parser is wrong" rather than "the carrier does not know".
+8. **A carrier lookup reveals a tracking number to a third party.** Turning
+   the connector on sends the seller's tracking numbers to the aggregator,
+   which is a new data-sharing relationship and a new party in the chain.
+   That is a deployment decision, which is part of why the flag exists.
+9. **Session theft.** The cookie is `HttpOnly`, `SameSite=Lax` and `Secure`
    in production, and the CSP forbids inline script, but a stolen cookie is
    a logged-in operator until it expires. There is no re-authentication step
    in front of Approve.
-7. **The login throttle is per-instance and in memory.** It raises the cost
+10. **The login throttle is per-instance and in memory.** It raises the cost
    of guessing from one address. It is cleared by a restart and does not
    defend against a distributed attempt.
-8. **Buyer PII at rest.** Dispute snapshots are stored verbatim, including
+11. **Buyer PII at rest.** Dispute snapshots are stored verbatim, including
    buyer names, emails and messages. They are excluded from Facts and from
    every JSON endpoint, but they are in the database and in the
    `cases` table unencrypted.
-9. **`X-Forwarded-For` is caller-supplied.** Behind Render it is set by the
+12. **`X-Forwarded-For` is caller-supplied.** Behind Render it is set by the
    proxy, but the app cannot prove that, so the throttle key is spoofable.
-10. **Dependency and CDN supply chain.** AG Grid and HTMX load from
+13. **Dependency and CDN supply chain.** AG Grid and HTMX load from
     `cdn.jsdelivr.net` at pinned versions under a CSP that allows that one
     host. A compromise of that host or of a pinned artefact would execute in
     the operator's browser. Nothing is vendored or integrity-pinned with
     SRI.
-11. **No rate limiting on the model call.** One call per read with retries
+14. **No rate limiting on the model call.** One call per read with retries
     capped, but nothing caps reads per dispute across a day.
-12. **`style-src` permits inline styles.** AG Grid sets row and cell
+15. **`style-src` permits inline styles.** AG Grid sets row and cell
     geometry through inline style attributes and injects its own style
     elements, so a strict `style-src` broke the grid outright: production
     logged hundreds of "Applying inline style violates ..." and the layout

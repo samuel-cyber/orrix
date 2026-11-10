@@ -32,6 +32,7 @@ def create_app(
     paypal_reader=None,
     writer=None,
     reader_client=None,
+    carrier_client=None,
 ) -> FastAPI:
     """Build the application from one config object.
 
@@ -48,6 +49,7 @@ def create_app(
         paypal_reader=paypal_reader,
         writer=writer,
         reader_client=reader_client,
+        carrier_client=carrier_client,
     )
 
     @asynccontextmanager

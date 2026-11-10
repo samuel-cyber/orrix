@@ -45,6 +45,7 @@ REASON_FACTS_FAILED = "facts_failed"
 REASON_EVIDENCE_NOT_RECORDED = "evidence_not_recorded"
 REASON_WRITE_FAILED = "write_failed"
 REASON_STALE_LEDGER = "stale_ledger"
+REASON_STALE_CARRIER = "stale_carrier"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executed_approvals (
@@ -121,6 +122,14 @@ class ExecutorDeps:
     #: payload rebuilds. When the approval names a row and version, that row
     #: must still be at that version or the write is refused.
     order_ledger: Any | None = None
+    #: The carrier reading as it stands now, as two plain strings supplied by
+    #: the caller. Deliberately not a carrier object and deliberately not
+    #: fetched here: the executor makes no carrier call, and this module
+    #: imports nothing from orrix.carrier, so removing that module changes
+    #: neither this file nor an approval id. Both None whenever the connector
+    #: is off, which matches every approval created with it off.
+    carrier_status: str | None = None
+    carrier_checked_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +351,22 @@ def execute(approval: Approval, deps: ExecutorDeps) -> ExecutionResult:
             return ExecutionResult(
                 status=STATUS_REFUSED,
                 reason=REASON_STALE_LEDGER,
+                approval_id=approval.approval_id,
+                requires_review=True,
+            )
+
+    # The carrier reading the seller approved against must still be the
+    # reading on hand. An approval with no carrier binding skips this
+    # entirely, so nothing changes for a deployment with the connector off.
+    if approval.carrier_status is not None:
+        if (
+            approval.carrier_status != deps.carrier_status
+            or approval.carrier_checked_at != deps.carrier_checked_at
+        ):
+            log("execute.refused:" + REASON_STALE_CARRIER, OriginTag.SYSTEM)
+            return ExecutionResult(
+                status=STATUS_REFUSED,
+                reason=REASON_STALE_CARRIER,
                 approval_id=approval.approval_id,
                 requires_review=True,
             )

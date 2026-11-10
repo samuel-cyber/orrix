@@ -65,6 +65,20 @@ services:
       - key: LEDGER_MAX_PER_MINUTE
         value: "60"
 
+      # -- carrier connector ------------------------------------------
+      # Off by default and set inline, not prompted for: with this false
+      # the connector is inert and the deployment behaves exactly as it
+      # did before the connector existed. Flip it only together with a
+      # CARRIER_API_KEY below.
+      - key: CARRIER_ENABLED
+        value: "false"
+      - key: CARRIER_API_PROVIDER
+        value: "none"
+      - key: CARRIER_TIMEOUT_SECONDS
+        value: "10"
+      - key: CARRIER_MAX_LOOKUPS_PER_HOUR
+        value: "60"
+
       # -- secrets: set every one of these in the Render dashboard ----
       # sync: false means Render will not read a value from this file and
       # will prompt for it instead, so nothing secret is ever committed.
@@ -114,4 +128,11 @@ services:
       # Optional AG Grid Enterprise licence. Without it the grid still
       # works and shows a watermark.
       - key: AG_GRID_LICENSE_KEY
+        sync: false
+
+      # Carrier aggregator key, used only when CARRIER_ENABLED is true.
+      # Sent in a request header, never logged and never echoed into a
+      # page. Without it the connector reports every lookup as
+      # unavailable rather than failing.
+      - key: CARRIER_API_KEY
         sync: false

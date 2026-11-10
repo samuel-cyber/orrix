@@ -14,6 +14,10 @@ from .seller_input import SellerEvidenceInput
 
 SOURCE_PAYPAL_RECORD = "paypal_record"
 SOURCE_SELLER_INPUT = "seller_input"
+#: Origin stamp for anything a carrier API relayed. Named here rather than in
+#: orrix/carrier.py so this module stays free of any import of it: the facts
+#: layer must build identically whether or not the connector exists.
+SOURCE_CARRIER_API = "carrier API"
 
 # Shapes a trusted value is allowed to take. Anything failing its pattern
 # becomes unavailable rather than being passed through as text.
@@ -52,12 +56,26 @@ FACT_NAMES: tuple[str, ...] = (
     "evidence_submitted",
 )
 
+#: Names a carrier lookup may add, and the only ones it may add. Kept out of
+#: FACT_NAMES on purpose: build_facts never populates them, so a case with no
+#: carrier lookup carries exactly the facts it carried before the connector
+#: existed -- same keys, same count, same approval id. The overlay lives in
+#: orrix.carrier; this module only reserves the names.
+CARRIER_STATUS = "carrier_status"
+CARRIER_DELIVERED_AT = "carrier_delivered_at"
+CARRIER_FACT_NAMES: tuple[str, ...] = (CARRIER_STATUS, CARRIER_DELIVERED_AT)
+
 
 class FactStatus(str, Enum):
     CONFIRMED = "confirmed"
     #: Asserted by the seller, not corroborated by the PayPal record. Usable
     #: for building evidence, but never treated as proof of anything.
     SELLER_ASSERTED = "seller_asserted"
+    #: Relayed by a carrier API. A third party's reading of a shipment, not
+    #: proof of delivery to the buyer and never promoted to confirmed. It is
+    #: deliberately absent from USABLE_STATUSES: no payload, no policy rule
+    #: and no action may rest on it.
+    CARRIER_REPORTED = "carrier_reported"
     CONFLICTING = "conflicting"
     UNAVAILABLE = "unavailable"
 

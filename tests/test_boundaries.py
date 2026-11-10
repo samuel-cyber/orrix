@@ -31,7 +31,7 @@ UNTRUSTED_SIDE = ("reader.py", "claim_form.py")
 
 # Leaf modules that take untrusted input or compare facts. They must stay
 # free of PayPal access, write capability, persistence and the reader.
-INPUT_AND_ANALYSIS_SIDE = ("seller_input.py", "discrepancy.py")
+INPUT_AND_ANALYSIS_SIDE = ("seller_input.py", "discrepancy.py", "carrier.py")
 
 # Any of these in reader.py or claim_form.py means credentials are being read
 # somewhere they should not be.
@@ -196,6 +196,8 @@ def test_reader_requests_no_tools_or_function_calling():
 NO_WRITE_CAPABILITY = (
     "seller_input.py",
     "discrepancy.py",
+    "carrier.py",
+    "evidence_pack.py",
     "reader.py",
     "facts.py",
     "claim_form.py",
@@ -596,6 +598,62 @@ def test_no_vendored_ag_grid_bundle_is_committed():
     ]
 
     assert not offenders, f"an AG Grid bundle is committed: {offenders}"
+
+
+def test_the_carrier_connector_cannot_create_an_approval():
+    """A third party's reading is not authority. It may not grant any."""
+    tree = parse(ORRIX_DIR / "carrier.py")
+    imports = imported_modules(tree)
+
+    offenders = sorted(name for name in imports if name.startswith("orrix.approval"))
+    assert not offenders, (
+        f"carrier.py reaches approval creation via {', '.join(offenders)}. A carrier "
+        f"response is untrusted input; it may fill a fact and nothing else."
+    )
+
+
+def test_the_carrier_connector_never_reaches_the_reader():
+    """Carrier text must not become model input, even indirectly."""
+    imports = imported_modules(parse(ORRIX_DIR / "carrier.py"))
+
+    offenders = sorted(
+        name for name in imports if name.startswith("orrix.reader") or "claim_form" in name
+    )
+    assert not offenders, f"carrier.py imports {offenders}; it has no path to the Reader."
+
+
+def test_the_carrier_result_holds_no_free_text_field():
+    """Enforced on the dataclass, not only on the parser's behaviour."""
+    from orrix.carrier import CarrierResult
+
+    free_text_names = {
+        "message",
+        "note",
+        "notes",
+        "subtag_message",
+        "location",
+        "signed_by",
+        "title",
+        "description",
+        "checkpoints",
+        "raw_tag",
+    }
+    offenders = free_text_names & set(CarrierResult.__dataclass_fields__)
+
+    assert not offenders, f"CarrierResult gained a free-text field: {offenders}"
+
+
+def test_the_evidence_pack_reads_no_prose_carrying_field():
+    """The PDF is a fixed template over Facts; no prose may reach it."""
+    constants = string_constants(parse(ORRIX_DIR / "evidence_pack.py"))
+
+    offenders = sorted(
+        constants & {"notes", "messages", "content", "item_label", "posted_by", "summary"}
+    )
+    assert not offenders, (
+        f"evidence_pack.py names prose-carrying fields: {offenders}. The pack is built "
+        f"from allowlisted facts only."
+    )
 
 
 def test_seller_input_has_no_free_text_field():

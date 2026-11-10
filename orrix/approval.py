@@ -67,6 +67,13 @@ class Approval:
     # an approval cannot be retargeted at a different row or a later version.
     ledger_row_id: int | None = None
     ledger_row_version: int | None = None
+    # The carrier reading the seller was looking at, when one was on the
+    # page. Folded into the approval id, so an approval granted while the
+    # carrier said one thing does not survive the carrier saying another.
+    # Both None when no carrier fact was present, which is every case with
+    # CARRIER_ENABLED off -- such an approval keeps its original id.
+    carrier_status: str | None = None
+    carrier_checked_at: str | None = None
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -91,6 +98,8 @@ class Approval:
             self.dispute_version,
             ledger_row_id=self.ledger_row_id,
             ledger_row_version=self.ledger_row_version,
+            carrier_status=self.carrier_status,
+            carrier_checked_at=self.carrier_checked_at,
         )
 
     def is_intact(self) -> bool:
@@ -104,6 +113,8 @@ def compute_approval_id(
     dispute_version: DisputeVersion,
     ledger_row_id: int | None = None,
     ledger_row_version: int | None = None,
+    carrier_status: str | None = None,
+    carrier_checked_at: str | None = None,
 ) -> str:
     """Hash of the canonical JSON of what is being approved.
 
@@ -113,6 +124,14 @@ def compute_approval_id(
     approval granted against one ledger row, at one version, does not survive
     a change to either. Both keys are omitted when there is no ledger match,
     so an approval with no row keeps the id it has always had.
+
+    The carrier reading is folded in on exactly the same terms. When the
+    seller approved while a carrier_reported fact was on the page, the status
+    and the time it was checked become part of the id, so a later or
+    different reading invalidates the approval. When no carrier fact was
+    present -- every case with the connector off -- both keys are absent and
+    the id is unchanged from what it would have been before the connector
+    existed.
     """
     material: dict[str, Any] = {
         "dispute_id": dispute_id,
@@ -123,6 +142,9 @@ def compute_approval_id(
     if ledger_row_id is not None:
         material["ledger_row_id"] = ledger_row_id
         material["ledger_row_version"] = ledger_row_version
+    if carrier_status is not None:
+        material["carrier_status"] = carrier_status
+        material["carrier_checked_at"] = carrier_checked_at
     return sha256_hex(canonical_json(material))
 
 
@@ -134,6 +156,8 @@ def create_approval(
     approved_by: str = APPROVAL_ACTOR_SELLER,
     ledger_row_id: int | None = None,
     ledger_row_version: int | None = None,
+    carrier_status: str | None = None,
+    carrier_checked_at: str | None = None,
 ) -> Approval:
     """Record a seller's explicit approval of one action.
 
@@ -158,6 +182,14 @@ def create_approval(
     if ledger_row_version is not None and not isinstance(ledger_row_version, int):
         raise ApprovalError("ledger_row_version must be an integer when given")
 
+    if carrier_status is not None and not isinstance(carrier_status, str):
+        raise ApprovalError("carrier_status must be a string when given")
+    if carrier_checked_at is not None and not isinstance(carrier_checked_at, str):
+        raise ApprovalError("carrier_checked_at must be a string when given")
+    if carrier_status is not None and carrier_checked_at is None:
+        # Binding half the reading would let the other half drift unnoticed.
+        raise ApprovalError("carrier_status requires carrier_checked_at")
+
     dispute_id = dispute_id.strip()
     payload_dict = json.loads(canonical_json(payload))
     approval_id = compute_approval_id(
@@ -167,6 +199,8 @@ def create_approval(
         dispute_version,
         ledger_row_id=ledger_row_id,
         ledger_row_version=ledger_row_version,
+        carrier_status=carrier_status,
+        carrier_checked_at=carrier_checked_at,
     )
 
     return Approval(
@@ -179,4 +213,6 @@ def create_approval(
         created_at=datetime.now(timezone.utc).isoformat(),
         ledger_row_id=ledger_row_id,
         ledger_row_version=ledger_row_version,
+        carrier_status=carrier_status,
+        carrier_checked_at=carrier_checked_at,
     )
