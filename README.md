@@ -386,6 +386,7 @@ secret is committed:
 | `AUDIT_HMAC_KEY` | keying the audit chain |
 | `LEDGER_API_KEY` | bearer token for `POST /api/orders` machine ingest; unset disables it |
 | `AG_GRID_LICENSE_KEY` | optional; without it the grid shows a watermark |
+| `SITE_REPO_URL` | optional; the repository the landing and evaluation pages link to. Defaults to this repository, so it only needs setting on a fork. A blank value counts as unset |
 | `CARRIER_ENABLED` | the carrier connector; **defaults to `false`** and off means nothing runs |
 | `CARRIER_API_PROVIDER` | `aftership` or `none` (default); an unknown name degrades to "unavailable" |
 | `CARRIER_API_KEY` | the aggregator key; sent in a header, never logged |

@@ -72,6 +72,14 @@ services:
       - key: LEDGER_MAX_PER_MINUTE
         value: "60"
 
+      # The repository linked from the landing page and the evaluation page.
+      # Declared here, inline, so the Blueprint is the single answer and a
+      # value typed into the dashboard cannot drift from it unnoticed. The
+      # code defaults to this same URL, so the links are correct even with
+      # no variable set. Change it on a fork.
+      - key: SITE_REPO_URL
+        value: https://github.com/samuel-cyber/orrix
+
       # -- carrier connector ------------------------------------------
       # Off by default and set inline, not prompted for: with this false
       # the connector is inert and the deployment behaves exactly as it

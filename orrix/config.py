@@ -26,6 +26,16 @@ SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
 DEFAULT_DB_PATH = "orrix.db"
 DEFAULT_PORT = 8010
 
+#: The project's public repository, linked from the landing page and the
+#: evaluation page. Not a secret, and not a placeholder: the correct URL is
+#: the default, so a deployment links to the right place with no environment
+#: variable set at all. SITE_REPO_URL overrides it for a fork.
+#:
+#: Named once here rather than repeated as a literal in the dataclass default
+#: and again in load_config, which is how the placeholder survived in two
+#: places at once.
+DEFAULT_SITE_REPO_URL = "https://github.com/samuel-cyber/orrix"
+
 ENV_PRODUCTION = "production"
 ENV_DEVELOPMENT = "development"
 
@@ -117,9 +127,10 @@ class AppConfig:
     results_path: str = "results/summary.json"
     results_notes_path: str = "docs/RESULTS.md"
 
-    # The project's public repository, linked from the landing page footer.
-    # A placeholder is shown when it is unset. Not a secret.
-    site_repo_url: str = "https://github.com/example/orrix"
+    # The project's public repository, linked from the landing page footer
+    # and the evaluation page. Not a secret. Defaults to the real repository,
+    # so an unset environment still links correctly.
+    site_repo_url: str = DEFAULT_SITE_REPO_URL
 
     # -- carrier connector -----------------------------------------------
     # Off by default. With carrier_enabled false no client is built, no
@@ -298,7 +309,11 @@ def load_config() -> AppConfig:
         ag_grid_license_key=os.environ.get("AG_GRID_LICENSE_KEY"),
         results_path=os.environ.get("ORRIX_RESULTS_PATH", "results/summary.json"),
         results_notes_path=os.environ.get("ORRIX_RESULTS_NOTES_PATH", "docs/RESULTS.md"),
-        site_repo_url=os.environ.get("SITE_REPO_URL", "https://github.com/example/orrix"),
+        # An empty or whitespace-only value is treated as unset rather than
+        # blanking the link, so a variable left blank in a dashboard cannot
+        # produce an href of "".
+        site_repo_url=(os.environ.get("SITE_REPO_URL") or "").strip()
+        or DEFAULT_SITE_REPO_URL,
         carrier_enabled=_flag("CARRIER_ENABLED", False),
         carrier_api_provider=os.environ.get("CARRIER_API_PROVIDER", "none"),
         carrier_api_key=os.environ.get("CARRIER_API_KEY"),
