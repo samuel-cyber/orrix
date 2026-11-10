@@ -145,9 +145,23 @@
     var seconds = base;
     var label = node.getAttribute("data-poll-label") || "";
 
+    // Mirrors poll_age_label in orrix/web/services.py. Keep the two in step.
+    function ageLabel(value) {
+      if (value < 60) {
+        return value + "s";
+      }
+      if (value < 3600) {
+        return Math.floor(value / 60) + "m";
+      }
+      if (value < 86400) {
+        return Math.floor(value / 3600) + "h";
+      }
+      return Math.floor(value / 86400) + "d";
+    }
+
     function paint() {
       if (seconds >= 0) {
-        label = "polled " + seconds + "s ago";
+        label = "polled " + ageLabel(seconds) + " ago";
       }
       node.textContent = label;
       node.classList.toggle("stale", enabled && seconds >= 300);

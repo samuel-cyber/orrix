@@ -156,6 +156,16 @@ def poll_once() -> dict[str, int]:
         else:
             counts["failed"] += 1
 
+    # Record the pass itself, not the disputes it touched. A pass that
+    # skipped everything still proves the poller is alive, and that is what
+    # the console's "polled Ns ago" indicator is asking about.
+    try:
+        store.record_poll_completed()
+    except Exception as error:  # noqa: BLE001 - the indicator is not worth a crash
+        logger.warning(
+            "could not record the poll pass: %s: %s", type(error).__name__, error
+        )
+
     logger.info(
         "poll status=complete listed=%s processed=%s skipped=%s backfilled=%s failed=%s",
         counts["listed"],

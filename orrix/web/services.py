@@ -30,6 +30,23 @@ logger = logging.getLogger("orrix.web.services")
 #: repeated clicks.
 RERUN_COOLDOWN_SECONDS = 30
 
+def poll_age_label(seconds: int) -> str:
+    """A poll age a person can read: "42s", "7m", "3h", "2d".
+
+    Raw seconds are fine for a minute and absurd after that -- the header
+    read "polled 139000s ago" and nobody divides that in their head.
+    Mirrored in orrix/web/static/shell.js, which re-renders the same string
+    as the ticker counts up.
+    """
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
 #: Minimum seconds between two "Check carrier" presses for the same case.
 #: The per-number cache and the hourly cap already bound the cost; this stops
 #: one page from being leaned on.
@@ -193,18 +210,35 @@ class Services:
         return self._case_store
 
     def poll_status(self) -> dict[str, Any]:
-        """When the poller last synced a dispute, as seconds ago.
+        """When the poller last completed a pass, as seconds ago.
 
-        Reads the newest stored POLL event timestamp; it never makes a
-        network call. Absence (no poll yet) is reported as None, not zero,
-        so the indicator can say "not yet" rather than "0s ago".
+        Reads the recorded poll pass; it never makes a network call.
+        Absence (no poll yet) is reported as None, not zero, so the
+        indicator can say "not yet" rather than "0s ago".
+
+        This used to read MAX(received_at) over POLL.DISPUTE.SYNC events,
+        which answers a different question. Poll events are keyed
+        poll:<dispute>:<update_time>, so a pass over disputes that have not
+        changed inserts no row at all and that maximum stops moving. On a
+        deployment polling every 60 seconds the header read "polled 139000s
+        ago" -- the age of the last dispute *change*, not of the last poll.
         """
         from ..poller import POLL_EVENT_TYPE, poller_enabled
 
+        store_module = self._store()
         try:
-            latest = self._store().latest_event_at(POLL_EVENT_TYPE)
+            latest = store_module.last_poll_completed_at()
         except Exception:  # noqa: BLE001 - a missing table is "not polled"
             latest = None
+
+        if latest is None:
+            # A database written before poll passes were recorded still has
+            # the event timestamps. Better than "not yet", and it corrects
+            # itself after the next pass.
+            try:
+                latest = store_module.latest_event_at(POLL_EVENT_TYPE)
+            except Exception:  # noqa: BLE001 - a missing table is "not polled"
+                latest = None
 
         if latest is None:
             return {
@@ -231,7 +265,7 @@ class Services:
             "enabled": poller_enabled(),
             "seconds_ago": seconds,
             "last_at": latest,
-            "label": f"polled {seconds}s ago",
+            "label": f"polled {poll_age_label(seconds)} ago",
         }
 
     def list_dispute_ids(self) -> list[str]:

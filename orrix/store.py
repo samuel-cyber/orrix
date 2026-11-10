@@ -25,6 +25,27 @@ CREATE TABLE IF NOT EXISTS cases (
     snapshot_json TEXT NOT NULL,
     fetched_at    TEXT NOT NULL
 );
+
+-- When the poller last completed a pass. One row, overwritten each time.
+--
+-- This exists because "when did we last poll" and "when did a dispute last
+-- change" are different questions, and the console was asking the second
+-- one. Poll events are keyed poll:<dispute>:<update_time>, so an unchanged
+-- dispute inserts no new row and MAX(received_at) stops moving: the header
+-- read "polled 139000s ago" on a deployment polling every 60 seconds.
+CREATE TABLE IF NOT EXISTS poll_runs (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    completed_at TEXT NOT NULL
+);
+"""
+
+# Repeated on its own so record_poll_completed can create the table against a
+# database that predates it, without re-running the whole schema.
+_POLL_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS poll_runs (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    completed_at TEXT NOT NULL
+);
 """
 
 
@@ -141,12 +162,46 @@ def count_cases() -> int:
         return connection.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
 
 
+def record_poll_completed(when: str | None = None) -> None:
+    """Mark a completed polling pass. Called once per pass, always.
+
+    Recorded whether or not the pass found anything to do, which is the
+    whole point: it answers "is the poller alive", not "did a dispute
+    change". The table is created lazily so a database written by an older
+    build starts recording without a migration step.
+    """
+    timestamp = when or _now()
+    with closing(connect()) as connection, connection:
+        connection.executescript(_POLL_RUNS_SCHEMA)
+        connection.execute(
+            """
+            INSERT INTO poll_runs (id, completed_at) VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET completed_at = excluded.completed_at
+            """,
+            (timestamp,),
+        )
+
+
+def last_poll_completed_at() -> str | None:
+    """When the poller last finished a pass, or None if it never has."""
+    with closing(connect()) as connection, connection:
+        try:
+            row = connection.execute(
+                "SELECT completed_at FROM poll_runs WHERE id = 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # The table has not been created yet: no pass has completed.
+            return None
+    return row["completed_at"] if row and row["completed_at"] else None
+
+
 def latest_event_at(event_type: str | None = None) -> str | None:
     """When the most recent event of a type arrived, or None if never.
 
-    The poller records one POLL.DISPUTE.SYNC event per dispute it refreshes.
-    The newest of those timestamps is what the console's "polled Ns ago"
-    indicator reads. It is a stored timestamp, never a live network call.
+    This is "when did a dispute of this type last change", NOT "when did we
+    last poll": poll events are keyed by dispute and update_time, so an
+    unchanged dispute inserts nothing. Use last_poll_completed_at for the
+    liveness question. It is a stored timestamp, never a live network call.
     """
     with closing(connect()) as connection, connection:
         if event_type is None:

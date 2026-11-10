@@ -98,7 +98,7 @@
               <path d="M3 5h18M3 12h18M3 19h18"></path>
             </svg>
           </button>
-          <span class="poll-indicator" title="From the poller's last successful sync; no live call">
+          <span class="poll-indicator" title="From the poller's last completed pass; no live call">
             <span class="poll-dot{% if poll and poll.seconds_ago is none %} stale{% endif %}" data-poll-dot></span>
             <span data-poll-label
                   data-poll-seconds="{% if poll and poll.seconds_ago is not none %}{{ poll.seconds_ago }}{% else %}-1{% endif %}"
