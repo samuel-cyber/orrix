@@ -189,6 +189,7 @@ class Services:
         """
         status, checked_at = self.carrier_binding_for(dispute_id)
         return ExecutorDeps(
+            persist_confirmation=self.persist_confirmed_snapshot,
             paypal_reader=self.paypal_reader,
             writer=self.writer,
             audit=self.audit,
@@ -406,6 +407,79 @@ class Services:
             )
         logger.info("fetched dispute_id=%s on demand", dispute_id)
         return snapshot
+
+    def persist_confirmed_snapshot(
+        self, dispute_id: str, snapshot: dict[str, Any]
+    ) -> bool:
+        """Store the executor's confirming re-fetch and rebuild the view.
+
+        Handed to the executor through ExecutorDeps. The confirming re-fetch
+        is the record that proved the evidence landed, so it becomes the
+        case's record immediately: without this the console kept showing the
+        pre-execution snapshot -- old status, evidence_submitted false, the
+        Approve button still live -- right after reporting a confirmed
+        submission.
+
+        Raises on failure so the executor can report that the console's copy
+        is behind rather than claiming a clean success.
+        """
+        from ..pipeline import sync_case
+
+        stored = self._store().save_case_snapshot_if_not_older(dispute_id, snapshot)
+        if not stored:
+            # Older than what is held. Nothing to do and nothing wrong: the
+            # record on file already reflects this write or something later.
+            logger.info(
+                "confirmed record for dispute_id=%s is older than the stored one; kept",
+                dispute_id,
+            )
+            return False
+
+        # Rebuild the view so the queue and the case page agree with the
+        # snapshot. No Reader: a confirmation must not spend a credit.
+        sync_case(
+            snapshot,
+            self.sync_deps(),
+            seller_input=self.get_seller_input(dispute_id),
+            case_state=self.case_state_for(dispute_id),
+        )
+        return True
+
+    def executed_approval_for(self, dispute_id: str) -> dict[str, Any] | None:
+        """The approval Orrix already carried out on this dispute, if any."""
+        from ..policy import PROVIDE_EVIDENCE
+
+        try:
+            return self.executed.latest_for(dispute_id, PROVIDE_EVIDENCE)
+        except Exception as error:  # noqa: BLE001 - an unreadable table is "none"
+            logger.warning(
+                "could not read executed approvals for dispute_id=%s: %s",
+                dispute_id,
+                type(error).__name__,
+            )
+            return None
+
+    def case_state_for(self, dispute_id: str):
+        """What Orrix has already done on this dispute, for the policy.
+
+        Built from the executed-approval ledger, which is durable: a restart
+        loses the last execution's in-memory result but not this. It can only
+        ever remove permission -- policy turns it into a blocking reason and
+        an "already done" flag -- so a wrong answer here cannot authorise
+        anything.
+
+        Deliberately not derived from the `evidence_submitted` fact. That
+        fact is true whenever the record carries seller-submitted proof,
+        which includes proof submitted outside Orrix and, in the test corpus,
+        a fixture that uses it to carry tracking.
+        """
+        from ..policy import PROVIDE_EVIDENCE, CaseState
+
+        executed = self.executed_approval_for(dispute_id)
+        return CaseState(
+            dispute_id=dispute_id,
+            executed_actions=frozenset({PROVIDE_EVIDENCE}) if executed else frozenset(),
+        )
 
     def reindex(self, dispute_id: str):
         """Rebuild the stored view after operator input, with no model call.

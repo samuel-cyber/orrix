@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from .paypal_write import (
 from .orders import apply_matched
 from .policy import PROVIDE_EVIDENCE, CaseState, PolicyConfig, decide
 from .seller_input import SellerEvidenceInput
+
+logger = logging.getLogger("orrix.executor")
 
 ACTOR = "executor"
 
@@ -46,6 +49,7 @@ REASON_EVIDENCE_NOT_RECORDED = "evidence_not_recorded"
 REASON_WRITE_FAILED = "write_failed"
 REASON_STALE_LEDGER = "stale_ledger"
 REASON_STALE_CARRIER = "stale_carrier"
+REASON_CONFIRMATION_NOT_STORED = "confirmation_not_stored"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS executed_approvals (
@@ -95,6 +99,25 @@ class ExecutedApprovals:
             ).fetchone()
             return row is not None
 
+    def latest_for(self, dispute_id: str, action: str | None = None) -> dict[str, Any] | None:
+        """The most recent claimed approval for a dispute, or None.
+
+        A read, and the durable answer to "has Orrix already acted on this
+        case". The console uses it so the page reflects what was done even
+        after a restart, when the in-memory result of the last execution is
+        gone.
+        """
+        query = "SELECT * FROM executed_approvals WHERE dispute_id = ?"
+        params: list[Any] = [dispute_id]
+        if action is not None:
+            query += " AND action = ?"
+            params.append(action)
+        query += " ORDER BY claimed_at DESC, approval_id DESC LIMIT 1"
+
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(query, params).fetchone()
+        return dict(row) if row else None
+
     def count(self) -> int:
         with closing(self._connect()) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM executed_approvals").fetchone()[0]
@@ -130,6 +153,16 @@ class ExecutorDeps:
     #: is off, which matches every approval created with it off.
     carrier_status: str | None = None
     carrier_checked_at: str | None = None
+    #: Where the confirming re-fetch is persisted. Called with
+    #: (dispute_id, snapshot) once the write is confirmed, and expected to
+    #: store the snapshot and rebuild the case view.
+    #:
+    #: Injected rather than reached for: this module must not resolve a
+    #: database path of its own. orrix/store.py once read the environment
+    #: directly and the poller wrote one file while the console read
+    #: another; a writer that picks its own path would reintroduce exactly
+    #: that. The web layer passes Services.persist_confirmed_snapshot.
+    persist_confirmation: Callable[[str, Mapping[str, Any]], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +273,33 @@ def _evidence_was_added(
     return count_seller_evidence(after, tracking_number) > count_seller_evidence(
         before, tracking_number
     )
+
+
+def _persist_confirmation(
+    deps: ExecutorDeps, dispute_id: str, confirmation: Mapping[str, Any]
+) -> bool:
+    """Store the confirming re-fetch as the case's record. True on success.
+
+    No sink injected means nothing to persist against -- a replay harness or
+    a one-off script -- which is reported as success because there is no
+    console to leave stale. Production always has one; there is a test that
+    Services.executor_deps supplies it.
+    """
+    sink = deps.persist_confirmation
+    if sink is None:
+        return True
+
+    try:
+        sink(dispute_id, confirmation)
+    except Exception as error:  # noqa: BLE001 - the write already landed
+        logger.warning(
+            "could not store the confirmed record dispute_id=%s exception=%s message=%s",
+            dispute_id,
+            type(error).__name__,
+            error,
+        )
+        return False
+    return True
 
 
 def execute(approval: Approval, deps: ExecutorDeps) -> ExecutionResult:
@@ -440,6 +500,31 @@ def execute(approval: Approval, deps: ExecutorDeps) -> ExecutionResult:
         return ExecutionResult(
             status=STATUS_UNCONFIRMED,
             reason=REASON_EVIDENCE_NOT_RECORDED,
+            approval_id=approval.approval_id,
+            writes_attempted=1,
+            requires_review=True,
+            debug_id=write_result.debug_id,
+        )
+
+    # (g) the confirmed record becomes the case's record.
+    #
+    # This re-fetch is the newest truth Orrix has about the dispute: it is
+    # the one that proved the evidence landed. Discarding it left the console
+    # showing the pre-execution record -- evidence_submitted false, the old
+    # status, the Approve button still live -- immediately after reporting a
+    # confirmed submission.
+    #
+    # Persisted before the confirming audit entry is appended, so there is no
+    # ordering in which the chain says "confirmed" while the stored record
+    # still predates the write.
+    persisted = _persist_confirmation(deps, approval.dispute_id, confirmation)
+    if not persisted:
+        # The write happened and is confirmed; only the console's copy is
+        # behind. Say so loudly rather than reporting a clean success.
+        log("execute.confirmed_unpersisted", OriginTag.PAYPAL_RECORD, tracking_number)
+        return ExecutionResult(
+            status=STATUS_EXECUTED,
+            reason=REASON_CONFIRMATION_NOT_STORED,
             approval_id=approval.approval_id,
             writes_attempted=1,
             requires_review=True,

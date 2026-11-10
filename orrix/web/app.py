@@ -401,7 +401,19 @@ def _load_case(
         return None
 
     seller_input = services.get_seller_input(dispute_id)
-    view = process_case(snapshot, services.pipeline_deps, seller_input=seller_input)
+    # What Orrix has already done on this dispute, from the executed-approval
+    # ledger. Policy turns an executed provide_evidence into a blocking
+    # reason, so a case that has been answered cannot offer the button again
+    # -- including after a restart, when the last result is no longer in
+    # memory.
+    case_state = services.case_state_for(dispute_id)
+    executed_approval = services.executed_approval_for(dispute_id)
+    view = process_case(
+        snapshot,
+        services.pipeline_deps,
+        seller_input=seller_input,
+        case_state=case_state,
+    )
 
     facts = view.facts
 
@@ -479,6 +491,18 @@ def _load_case(
         "status_label": status_label(view.status),
         "delivery_statuses": [status.value for status in DeliveryStatus],
         "can_approve": PROVIDE_EVIDENCE in view.decision.allowed_actions and payload is not None,
+        # The approval Orrix already carried out, from the durable ledger.
+        # Present means the case has been answered: the template shows a
+        # disabled "Evidence submitted" state with this id instead of the
+        # Approve button.
+        "executed_approval": executed_approval,
+        "executed_at_label": (
+            _display_timestamp(executed_approval.get("claimed_at"))
+            if executed_approval
+            else None
+        ),
+        "evidence_submitted": facts is not None
+        and facts.value("evidence_submitted") is True,
         "last_result": services.get_result(dispute_id),
         "reader_summary_text": _reader_summary_text(view.reader_result),
         "reader_endpoint_host": _reader_endpoint_host(services.config),

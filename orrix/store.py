@@ -133,6 +133,50 @@ def save_case_snapshot(dispute_id: str, snapshot: dict[str, Any]) -> None:
         )
 
 
+def _snapshot_instant(snapshot: Any) -> datetime | None:
+    """A snapshot's update_time as a UTC instant, or None if unusable."""
+    if not isinstance(snapshot, dict):
+        return None
+    raw = snapshot.get("update_time")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def save_case_snapshot_if_not_older(dispute_id: str, snapshot: dict[str, Any]) -> bool:
+    """Store a snapshot unless it predates the one already held.
+
+    Returns True when it was stored. A strictly older record is refused and
+    reported, never written.
+
+    This exists because of what happens after an execution. The executor's
+    confirming re-fetch is the newest record Orrix has -- the one showing
+    the evidence landed -- and a poll a second later can legitimately return
+    an older view of the same dispute while PayPal settles. Last-fetch-wins
+    would let that poll undo the confirmation and put the Approve button
+    back on a case that has already been answered.
+
+    Equal update_time is allowed through: re-storing the same version is
+    harmless, and it keeps a re-fetch of an unchanged dispute idempotent
+    rather than special.
+    """
+    incoming = _snapshot_instant(snapshot)
+    existing = get_case(dispute_id)
+    current = _snapshot_instant(existing.get("snapshot") if existing else None)
+
+    if incoming is not None and current is not None and incoming < current:
+        return False
+
+    save_case_snapshot(dispute_id, snapshot)
+    return True
+
+
 def get_case(dispute_id: str) -> dict[str, Any] | None:
     with closing(connect()) as connection, connection:
         row = connection.execute(

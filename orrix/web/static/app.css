@@ -684,6 +684,14 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; box-sha
 }
 .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-primary:disabled, .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* A finished action. Reads as done rather than as unavailable, so a case
+   that has been answered does not look like one that is merely blocked. */
+.btn-done {
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+  color: var(--ok);
+}
+.btn-done:disabled { opacity: 1; cursor: default; }
 .btn-quiet { margin-top: 0; padding: 6px 11px; font-weight: 500; }
 .btn-lg { padding: 12px 22px; font-size: 16px; }
 

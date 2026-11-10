@@ -133,7 +133,21 @@ def refresh_case(event_id: str, event_type: str | None, dispute_id: str) -> bool
         )
         return False
 
-    store.save_case_snapshot(dispute_id, snapshot)
+    # Never regress the stored record. The executor's confirming re-fetch is
+    # the newest truth about a dispute it just answered; a poll or a webhook
+    # that arrives with an older view of the same dispute must not undo it.
+    if not store.save_case_snapshot_if_not_older(dispute_id, snapshot):
+        store.set_event_status(event_id, "processed")
+        logger.info(
+            "event_id=%s event_type=%s dispute_id=%s status=processed indexed=%s "
+            "update_time=%s",
+            event_id,
+            event_type,
+            dispute_id,
+            "skipped_older_record",
+            snapshot.get("update_time"),
+        )
+        return True
 
     # Index it for the queue straight away. Storing the snapshot alone left
     # the console with nothing to list, which is how a poll reporting five

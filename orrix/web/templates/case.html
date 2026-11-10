@@ -436,6 +436,23 @@
       {% endif %}
     </details>
 
+    {% if executed_approval %}
+    {# Answered. No form at all: there is nothing left to approve, and a
+       disabled button inside a live form invites a re-post. #}
+    <div class="stack approve-form" data-evidence-submitted>
+      <button type="button" class="btn btn-lg btn-done" disabled>
+        Evidence submitted
+      </button>
+      <p class="muted small">
+        Submitted and confirmed on the re-fetched dispute under approval
+        <span class="mono">{{ executed_approval.approval_id[:16] }}&hellip;</span>
+        {% if executed_at_label %}
+        on <span class="mono">{{ executed_at_label }}</span>.
+        {% endif %}
+        The facts above are the record PayPal returned after the write.
+      </p>
+    </div>
+    {% else %}
     <form method="post" action="/cases/{{ dispute_id }}/approve" class="stack approve-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="dispute_update_time" value="{{ snapshot.get('update_time', '') }}">
@@ -455,6 +472,7 @@
       </p>
       {% endif %}
     </form>
+    {% endif %}
   </section>
 </div>
 {% endblock %}
