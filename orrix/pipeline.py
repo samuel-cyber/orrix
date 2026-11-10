@@ -411,6 +411,59 @@ def _failed_view(
     return view
 
 
+def _strip_fetch_times(payload: Any) -> Any:
+    """A facts payload with every retrieval timestamp removed.
+
+    `retrieved_at` records when Orrix asked PayPal, not anything about the
+    dispute, so it changes on every poll. Hashing it would make every
+    unchanged dispute look new -- which is exactly how the audit log grew
+    12k "synced" entries in two days.
+    """
+    if not isinstance(payload, Mapping):
+        return {}
+
+    stripped = {key: value for key, value in payload.items() if key != "retrieved_at"}
+    facts = stripped.get("facts")
+    if isinstance(facts, Mapping):
+        stripped["facts"] = {
+            name: (
+                {key: value for key, value in fact.items() if key != "retrieved_at"}
+                if isinstance(fact, Mapping)
+                else fact
+            )
+            for name, fact in facts.items()
+        }
+    return stripped
+
+
+def facts_content_hash(facts: Facts) -> str:
+    """Hash of the allowlisted facts, excluding when they were fetched.
+
+    Two fetches of a dispute nobody has touched produce the same hash. A
+    changed field, a new fact, a changed status or a changed origin produce
+    a different one.
+    """
+    return hash_payload(_strip_fetch_times(json.loads(facts.model_dump_json())))
+
+
+def _stored_content_hash(row: Mapping[str, Any] | None) -> str | None:
+    """The same hash for an already-stored case view, or None.
+
+    Computed from the row's own `facts_json` rather than from a column, so
+    this works against a database written by an older build without a
+    migration.
+    """
+    if not row:
+        return None
+    try:
+        payload = json.loads(row.get("facts_json") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not payload:
+        return None
+    return hash_payload(_strip_fetch_times(payload))
+
+
 def sync_case(
     snapshot: Mapping[str, Any],
     deps: PipelineDeps,
@@ -449,6 +502,25 @@ def sync_case(
             dispute_id, update_time, "decide", error, seller_input, deps, policy_config
         )
 
+    # What this dispute looked like last time, read before the view is
+    # overwritten. A poll that finds nothing new must leave no trace in the
+    # audit chain: the poller runs every 60 seconds over every dispute, so
+    # an unconditional entry here is 1,440 entries per dispute per day of
+    # "nothing happened".
+    try:
+        previous_row = deps.case_views.get(dispute_id)
+    except Exception as error:  # noqa: BLE001 - an unreadable row is "no previous"
+        logger.warning(
+            "could not read the previous case view dispute_id=%s exception=%s",
+            dispute_id,
+            type(error).__name__,
+        )
+        previous_row = None
+
+    content_hash = facts_content_hash(facts)
+    previous_hash = _stored_content_hash(previous_row)
+    previous_status = (previous_row or {}).get("status")
+
     view = CaseView(
         dispute_id=dispute_id,
         update_time=update_time if isinstance(update_time, str) else None,
@@ -473,12 +545,35 @@ def sync_case(
             dispute_id, update_time, "save_case_view", error, seller_input, deps, policy_config
         )
 
+    # Append only when something actually changed. "Changed" means the
+    # allowlisted facts moved, or the status the console shows moved -- a
+    # deadline passing is a real event even though no fact changed. The
+    # hash deliberately excludes the fetch time; see facts_content_hash.
+    #
+    # The chain stays valid either way: this skips an append, it never
+    # rewrites or removes one.
+    unchanged = (
+        previous_hash is not None
+        and previous_hash == content_hash
+        and previous_status == view.status
+    )
+
+    if unchanged:
+        logger.debug(
+            "pipeline sync unchanged dispute_id=%s status=%s (no audit entry)",
+            dispute_id,
+            view.status,
+        )
+        return view
+
     deps.audit.append(
         actor=ACTOR,
         action="pipeline.synced",
         origin_tag=OriginTag.PAYPAL_RECORD,
         dispute_id=dispute_id,
-        payload_hash=hash_payload(json.loads(facts.model_dump_json())),
+        # The content hash, so the entry's payload hash is stable for an
+        # unchanged dispute rather than moving with the fetch clock.
+        payload_hash=content_hash,
     )
     logger.info(
         "pipeline synced dispute_id=%s status=%s reader=pending flags=%s",
