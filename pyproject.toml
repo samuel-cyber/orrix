@@ -34,7 +34,16 @@ orrix-seed = "orrix.demo_seed:main"
 packages = ["orrix", "orrix.web"]
 
 [tool.setuptools.package-data]
-"orrix.web" = ["templates/*.html", "templates/partials/*.html", "static/*"]
+# lab_presets.json carries the Attack Lab's preset messages into the install.
+# It is generated from attacks/corpus.yaml by scripts/build_lab_presets.py;
+# the harness itself is deliberately not a package, so without this file the
+# deployed lab has no presets. Nothing from attacks/recorded/ is shipped.
+"orrix.web" = [
+    "templates/*.html",
+    "templates/partials/*.html",
+    "static/*",
+    "lab_presets.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

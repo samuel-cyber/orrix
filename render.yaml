@@ -29,6 +29,13 @@ services:
     region: frankfurt
     branch: main
 
+    # The Attack Lab's presets travel in orrix/web/lab_presets.json, declared
+    # as package-data in pyproject.toml, so they are present in both an
+    # editable and a wheel install. The evaluation harness in attacks/ is
+    # deliberately NOT installed -- it is not a declared package and its
+    # loader needs PyYAML, which is not a runtime dependency. Regenerate the
+    # preset file with `python scripts/build_lab_presets.py` after editing
+    # attacks/corpus.yaml; a test fails if the two drift.
     buildCommand: pip install --upgrade pip && pip install -e .
     startCommand: uvicorn orrix.main:app --host 0.0.0.0 --port $PORT
 

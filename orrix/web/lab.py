@@ -31,6 +31,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..approval import DisputeVersion, create_approval
@@ -578,12 +579,50 @@ def run_comparison(
 # ---------------------------------------------------------------------------
 
 
-def load_presets() -> tuple[dict[str, str], ...]:
-    """Author-written messages from attacks/corpus.yaml, or an empty tuple.
+#: The preset data shipped inside this package. Generated from
+#: attacks/corpus.yaml by scripts/build_lab_presets.py and carried into every
+#: install by package-data, so the lab has its presets on a deployment where
+#: the evaluation harness is not installed.
+PRESETS_FILE = Path(__file__).parent / "lab_presets.json"
 
-    The corpus ships with the evaluation harness, which is not installed at
-    runtime on the deployment. When it is absent the lab simply offers no
-    presets; the message box still works. Presets are never invented.
+
+def _presets_from_file(path: Path) -> tuple[dict[str, str], ...]:
+    """Presets from the shipped JSON. Empty tuple if it is absent or bad.
+
+    Only the four display fields are read, and each is checked: this file is
+    generated from the corpus, but it is still parsed rather than trusted.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except (OSError, ValueError) as error:
+        logger.warning("lab presets file unreadable: %s", type(error).__name__)
+        return ()
+
+    entries = payload.get("presets") if isinstance(payload, Mapping) else None
+    if not isinstance(entries, list):
+        logger.warning("lab presets file has no preset list")
+        return ()
+
+    presets: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        values = {key: entry.get(key) for key in ("id", "category", "text", "kind")}
+        if not all(isinstance(value, str) and value for value in values.values()):
+            continue
+        if values["kind"] not in ("honest", "hostile"):
+            continue
+        presets.append(dict(values))  # type: ignore[arg-type]
+    return tuple(presets)
+
+
+def _presets_from_corpus() -> tuple[dict[str, str], ...]:
+    """Presets straight from the harness, when it is importable.
+
+    The development path: a corpus edit shows up in the lab without
+    regenerating the shipped file.
     """
     try:
         from attacks.corpus import load_corpus
@@ -593,20 +632,42 @@ def load_presets() -> tuple[dict[str, str], ...]:
     try:
         attacks = load_corpus()
     except Exception as error:  # noqa: BLE001 - a missing or bad file is "no presets"
-        logger.info("lab presets unavailable: %s", type(error).__name__)
+        logger.info("lab presets unavailable from the corpus: %s", type(error).__name__)
         return ()
 
-    presets: list[dict[str, str]] = []
-    for attack in attacks:
-        presets.append(
-            {
-                "id": attack.id,
-                "category": attack.category,
-                "text": attack.text,
-                "kind": "honest" if attack.is_honest else "hostile",
-            }
-        )
-    return tuple(presets)
+    return tuple(
+        {
+            "id": attack.id,
+            "category": attack.category,
+            "text": attack.text,
+            "kind": "honest" if attack.is_honest else "hostile",
+        }
+        for attack in attacks
+    )
+
+
+def load_presets() -> tuple[dict[str, str], ...]:
+    """Author-written attack messages for the lab's preset list.
+
+    Read from the file shipped inside this package, which is what makes the
+    presets available on a deployment: the evaluation harness is not
+    installed there (`attacks` is not a declared package and its loader needs
+    PyYAML, which is not a runtime dependency), so importing it fails and the
+    lab used to report "the corpus is not installed".
+
+    Falls back to the live corpus when the shipped file is missing but the
+    harness is importable, which is the case in a development checkout
+    mid-edit. Presets are never invented: if neither source is available the
+    list is empty and the message box still works.
+    """
+    presets = _presets_from_file(PRESETS_FILE)
+    if presets:
+        return presets
+
+    presets = _presets_from_corpus()
+    if not presets:
+        logger.info("lab presets unavailable: no shipped file and no importable corpus")
+    return presets
 
 
 # ---------------------------------------------------------------------------

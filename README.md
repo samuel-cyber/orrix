@@ -207,6 +207,28 @@ Every test runs offline. A guard in `tests/conftest.py` fails any test that
 opens the operational `orrix.db`, and a stub client fails any test that
 would reach PayPal without a fake installed.
 
+### The Attack Lab's presets
+
+The `/lab` page offers the corpus's attack messages as presets. The corpus
+itself lives with the harness in `attacks/corpus.yaml`, which is **not**
+installed at runtime: `attacks` is not a declared package and its loader
+needs PyYAML, which is not a runtime dependency. So the deployed lab used to
+report that the corpus was not installed and offer nothing.
+
+The preset text and labels are therefore shipped as data, inside the
+application package:
+
+```sh
+python scripts/build_lab_presets.py   # after editing attacks/corpus.yaml
+```
+
+That writes `orrix/web/lab_presets.json` — four fields per preset (`id`,
+`category`, `text`, `kind`) and nothing else. It is declared as package-data,
+so it is present in an editable install and in a wheel alike. No harness
+code, metrics or recorded run is shipped. `tests/test_lab_presets.py` fails
+if the generated file drifts from the corpus, and proves the presets still
+load with both `attacks` and `yaml` made unimportable.
+
 ### Evaluation
 
 Recompute every number from recorded runs. No credentials, no network:
