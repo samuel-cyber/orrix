@@ -32,6 +32,13 @@
   --line-soft: #1b2532;
   --line-strong: #324359;
 
+  /* -- grid --------------------------------------------------------- */
+  /* The grid header sits a shade below the panel; hover is a faint mint
+     wash rather than a grey lift, so the accent runs through the table
+     as well as the buttons. */
+  --grid-header: #0c131c;
+  --grid-row-hover: rgba(46, 230, 176, 0.06);
+
   /* -- ink ---------------------------------------------------------- */
   --ink: #e9f0f8;
   --ink-soft: #94a3b8;
@@ -141,6 +148,8 @@
   --untrusted: #6d28d9;
   --untrusted-bg: #f4f0fd;
   --untrusted-line: #a78bfa;
+  --grid-header: #f1f4f8;
+  --grid-row-hover: rgba(15, 118, 110, 0.06);
   --carrier: #0f766e;
   --carrier-bg: #e6f7f5;
   --carrier-line: #99d9d2;
@@ -391,6 +400,11 @@ code {
   padding: var(--sp-5);
   flex: 1;
 }
+
+/* The grid pages get more room than the prose pages. 1180px leaves 1132px
+   of content, which is less than the dispute queue's columns need at their
+   minimums -- that shortfall was the horizontal scrollbar. */
+.page-wide { max-width: 1600px; }
 
 .footer {
   max-width: 1180px;
@@ -766,8 +780,16 @@ details.payload-preview summary {
   font-weight: 600;
   cursor: pointer;
 }
+.filter-chip { transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease; }
 .filter-chip:hover { color: var(--ink); border-color: var(--line-strong); }
-.filter-chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+/* The chosen filter is filled mint, so which one is on is unmistakable
+   rather than a faint tint away from the others. */
+.filter-chip.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.filter-chip.active:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-ink); }
 
 .visually-hidden {
   position: absolute;
@@ -781,7 +803,7 @@ details.payload-preview summary {
 
 /* == deadline chips: colour by time left, text says the same ========= */
 
-.chip-deadline-ok { background: var(--surface-2); color: var(--ink-soft); border-color: var(--line); }
+.chip-deadline-ok { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
 .chip-deadline-soon { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
 .chip-deadline-critical { background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .chip-deadline-passed { background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
@@ -1326,34 +1348,257 @@ details.payload-preview summary {
 }
 
 /* == AG Grid bridge ==================================================
- * AG Grid's quartz theme is ours to restyle: it reads --ag-* variables, so
- * the grid follows the tokens instead of fighting them. Both themes are
- * covered because these names resolve from :root and [data-theme="light"].
+ * The grid wears ag-theme-quartz-dark and every colour it shows comes from
+ * the app's own tokens, so one palette drives the page and the grid.
+ *
+ * The compound selector (.orrix-grid.ag-theme-quartz-dark) is deliberate and
+ * load-order-proof. base.html links app.css *before* the page's {% block
+ * head %}, so AG Grid's CDN stylesheet always lands after ours. A plain
+ * `.ag-theme-quartz { --ag-background-color: ... }` here has the same
+ * specificity as the vendor's own rule and therefore lost to it on source
+ * order -- which is why the grid rendered on a white background however
+ * carefully the tokens were set. Two classes beat one, whatever the order.
+ *
+ * The dark base is used in both app themes: it is only a starting point, and
+ * every visible colour below is a token that flips with [data-theme="light"].
  */
-.ag-theme-quartz {
+.orrix-grid.ag-theme-quartz-dark {
   --ag-font-family: var(--font-sans);
   --ag-font-size: 13.5px;
+
+  /* Rows sit on the panel colour; the header is a shade darker so it reads
+     as a separate strip without needing a heavy rule under it. */
   --ag-background-color: var(--surface);
   --ag-foreground-color: var(--ink);
-  --ag-border-color: var(--line);
-  --ag-secondary-border-color: var(--line-soft);
-  --ag-header-background-color: var(--surface-2);
+  --ag-header-background-color: var(--grid-header);
   --ag-header-foreground-color: var(--ink-soft);
   --ag-odd-row-background-color: var(--surface);
-  --ag-row-hover-color: var(--surface-3);
+
+  --ag-border-color: var(--line);
+  --ag-secondary-border-color: var(--line-soft);
+  --ag-row-border-color: var(--line-soft);
+  --ag-header-column-separator-color: var(--line);
+  --ag-header-column-resize-handle-color: var(--line-strong);
+
+  /* A faint mint wash on hover, a stronger one for the selected row. */
+  --ag-row-hover-color: var(--grid-row-hover);
   --ag-selected-row-background-color: var(--accent-soft);
-  --ag-input-focus-border-color: var(--accent);
   --ag-range-selection-background-color: var(--accent-soft);
+  --ag-range-selection-border-color: var(--accent-line);
+
+  --ag-input-focus-border-color: var(--accent);
+  --ag-input-focus-box-shadow: 0 0 0 3px var(--accent-soft);
   --ag-checkbox-checked-color: var(--accent);
-  --ag-modal-overlay-background-color: rgba(3, 6, 10, 0.55);
+  --ag-checkbox-unchecked-color: var(--ink-faint);
+  --ag-active-color: var(--accent);
+
+  --ag-control-panel-background-color: var(--surface-2);
+  --ag-panel-background-color: var(--surface-2);
+  --ag-panel-border-color: var(--line);
+  --ag-menu-background-color: var(--surface-2);
+  --ag-menu-border-color: var(--line);
+  --ag-tooltip-background-color: var(--surface-3);
+  --ag-modal-overlay-background-color: rgba(3, 6, 10, 0.6);
+
   --ag-border-radius: var(--radius);
+  --ag-row-height: 56px;
+  --ag-header-height: 48px;
+  --ag-cell-horizontal-padding: var(--sp-4);
 }
-.ag-theme-quartz .ag-root-wrapper { border-color: var(--line); border-radius: var(--radius-lg); }
-.ag-theme-quartz .ag-header-cell-text { font-weight: 600; letter-spacing: 0.01em; }
-.ag-theme-quartz .ag-cell.mono { font-family: var(--font-mono); font-size: 12.5px; }
-.ag-theme-quartz .row-chain-bad { background: var(--err-bg); }
-.ag-theme-quartz .row-chain-suspect { background: var(--warn-bg); }
-.ag-theme-quartz .ag-row.ag-row-hover { transition: background-color 0.12s ease; }
+
+.orrix-grid.ag-theme-quartz-dark .ag-root-wrapper {
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.orrix-grid.ag-theme-quartz-dark .ag-header {
+  border-bottom: 1px solid var(--line);
+}
+.orrix-grid.ag-theme-quartz-dark .ag-header-cell-text {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* Single-line cells centred by their line box rather than by flex.
+   AG Grid puts `ag-cell-value` on the cell element itself when there is no
+   wrapper, so a `display: block` value rule cancelled the flex centring and
+   left every pill riding 13px high. A line box works for both shapes, and
+   keeps text-overflow working, which flex does not. */
+.orrix-grid.ag-theme-quartz-dark .ag-cell {
+  display: block;
+  /* One pixel under the 56px row, matching AG Grid's own cell height. */
+  line-height: 54px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The first column carries the master/detail chevron in a wrapper; that one
+   still wants flex so icon and link sit on one line. */
+.orrix-grid.ag-theme-quartz-dark .ag-cell .ag-cell-wrapper {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+  line-height: normal;
+}
+.orrix-grid.ag-theme-quartz-dark .ag-cell.mono,
+.orrix-grid.ag-theme-quartz-dark .ag-cell .mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* The dispute id: the row's one link, in mint mono. */
+.orrix-grid.ag-theme-quartz-dark .ag-cell a.grid-link {
+  align-self: center;
+  line-height: 1.2;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.orrix-grid.ag-theme-quartz-dark .ag-cell a.grid-link:hover {
+  color: var(--accent-hover);
+  border-bottom-color: var(--accent-line);
+}
+
+.orrix-grid.ag-theme-quartz-dark .amount-cell {
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+.orrix-grid.ag-theme-quartz-dark .amount-cell .amount-currency {
+  color: var(--ink-faint);
+  margin-left: 5px;
+  font-size: 11.5px;
+}
+
+.orrix-grid.ag-theme-quartz-dark .row-chain-bad { background: var(--err-bg); }
+.orrix-grid.ag-theme-quartz-dark .row-chain-suspect { background: var(--warn-bg); }
+
+.orrix-grid.ag-theme-quartz-dark .ag-row {
+  transition: background-color 0.14s ease;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* Selected row: a mint edge rather than a wash, so the text stays legible. */
+.orrix-grid.ag-theme-quartz-dark .ag-row.ag-row-selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.orrix-grid.ag-theme-quartz-dark .ag-row-hover { cursor: pointer; }
+
+/* Mint focus ring, for keyboard navigation. */
+.orrix-grid.ag-theme-quartz-dark .ag-cell:focus-visible,
+.orrix-grid.ag-theme-quartz-dark .ag-cell-focus:not(.ag-cell-range-selected) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-color: transparent;
+}
+
+/* Status bar and side panel follow the panel colours too. */
+.orrix-grid.ag-theme-quartz-dark .ag-status-bar,
+.orrix-grid.ag-theme-quartz-dark .ag-side-bar {
+  background: var(--grid-header);
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+.orrix-grid.ag-theme-quartz-dark .ag-status-name-value-value { color: var(--ink); }
+.orrix-grid.ag-theme-quartz-dark .ag-watermark { opacity: 0.25; }
+
+/* A compact pill that fits a 56px row with room to spare. Used for the Due
+   column and for the small state/flag chips beside it. */
+.orrix-grid.ag-theme-quartz-dark .chip-grid {
+  height: 26px;
+  display: inline-block;
+  padding: 0 10px;
+  font-size: 11.5px;
+  /* 26px box: 24px of line plus the 1px borders. */
+  line-height: 24px;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  /* Lets a chip in a stack shrink and ellipsize; without it the flex item
+     keeps its content width and is cut mid-word at the column edge. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.orrix-grid.ag-theme-quartz-dark .status-pill,
+.orrix-grid.ag-theme-quartz-dark .chip {
+  height: 26px;
+  flex: none;
+  vertical-align: middle;
+  white-space: nowrap;
+  /* 24px of line inside a 26px box centres the label. `line-height: 1`
+     here pushed every pill above the row's middle, because this rule sits
+     after .chip-grid and has the same specificity. */
+  line-height: 24px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.orrix-grid.ag-theme-quartz-dark .status-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  vertical-align: middle;
+}
+/* The label inside a status pill is what ellipsizes; the glyph stays. */
+.orrix-grid.ag-theme-quartz-dark .status-pill > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Plain text cells ellipsize rather than being cut mid-glyph. */
+.orrix-grid.ag-theme-quartz-dark .ag-cell-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.orrix-grid.ag-theme-quartz-dark .chip-stack {
+  /* inline-flex, not flex: a block-level box in a line-box cell sits at the
+     top instead of on the centred line. */
+  display: inline-flex;
+  vertical-align: middle;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.orrix-grid.ag-theme-quartz-dark .chip-stack .chip-grid { overflow: hidden; text-overflow: ellipsis; }
+.orrix-grid.ag-theme-quartz-dark .chip-more { color: var(--ink-faint); font-size: 11px; flex: none; }
+
+/* A soft, staggered fade-in on the first load only. The class is removed
+   once it has played, so a filter or a sort does not replay it. Ten rows at
+   20ms apart plus a 180ms fade is 360ms end to end. */
+/* Opacity only. AG Grid positions its rows with a transform of its own, so
+   animating transform here fought the virtualiser and left the first row
+   sitting under the header. */
+@keyframes grid-row-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .orrix-grid--entering .ag-row { animation: grid-row-in 180ms ease-out both; }
+  .orrix-grid--entering .ag-row:nth-child(1) { animation-delay: 0ms; }
+  .orrix-grid--entering .ag-row:nth-child(2) { animation-delay: 20ms; }
+  .orrix-grid--entering .ag-row:nth-child(3) { animation-delay: 40ms; }
+  .orrix-grid--entering .ag-row:nth-child(4) { animation-delay: 60ms; }
+  .orrix-grid--entering .ag-row:nth-child(5) { animation-delay: 80ms; }
+  .orrix-grid--entering .ag-row:nth-child(6) { animation-delay: 100ms; }
+  .orrix-grid--entering .ag-row:nth-child(7) { animation-delay: 120ms; }
+  .orrix-grid--entering .ag-row:nth-child(8) { animation-delay: 140ms; }
+  .orrix-grid--entering .ag-row:nth-child(9) { animation-delay: 160ms; }
+  .orrix-grid--entering .ag-row:nth-child(n + 10) { animation-delay: 180ms; }
+}
 
 /* == evaluation: takeaways and collapsible caveats =================== */
 

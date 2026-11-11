@@ -163,40 +163,37 @@
   function disputeLink(params) {
     if (!params.value) return document.createTextNode("");
     var link = document.createElement("a");
-    link.className = "mono";
+    link.className = "mono grid-link";
     link.href = "/cases/" + encodeURIComponent(params.value);
     link.textContent = params.value;
     return link;
   }
 
+  // Flex sizing with a minimum each, so the set fills the container at
+  // 1920px with no horizontal scrollbar and still degrades sensibly.
   var columns = [
     {
       headerName: "Dispute",
       field: "dispute_id",
-      minWidth: 210,
+      flex: 2,
+      minWidth: 195,
       cellRenderer: disputeLink,
-      filter: "agTextColumnFilter",
-      // The expand arrow belongs on the first visible column.
-      cellRendererParams: {},
-      showRowGroup: false
+      filter: "agTextColumnFilter"
     },
     {
       headerName: "Amount",
       field: "amount",
-      width: 130,
+      flex: 1,
+      minWidth: 115,
       filter: "agNumberColumnFilter",
       cellClass: "mono amount-cell",
-      valueFormatter: function (p) {
-        if (!p.value) return "";
-        return p.value + " " + ((p.data && p.data.currency) || "");
-      }
+      cellRenderer: OrrixGrid.amountCell
     },
-    { headerName: "Reason", field: "reason", minWidth: 230, filter: "agTextColumnFilter" },
-    { headerName: "PayPal state", field: "state", minWidth: 190, filter: "agTextColumnFilter" },
     {
       headerName: "Due",
       field: "hours_left",
-      minWidth: 140,
+      flex: 1,
+      minWidth: 105,
       sort: "asc",
       filter: "agNumberColumnFilter",
       cellRenderer: OrrixGrid.deadlineChip,
@@ -207,28 +204,89 @@
       }
     },
     {
+      headerName: "PayPal state",
+      field: "state",
+      flex: 1.4,
+      // Wide enough for the longest state chip; this column used to
+      // truncate to "no..." / "ye...".
+      minWidth: 180,
+      filter: "agTextColumnFilter",
+      cellRenderer: OrrixGrid.stateChip
+    },
+    {
+      headerName: "Orrix status",
+      field: "orrix_status_label",
+      flex: 1.6,
+      minWidth: 190,
+      filter: "agSetColumnFilter",
+      cellRenderer: statusPill,
+      tooltipField: "orrix_status_label"
+    },
+    {
       headerName: "Tracking",
       field: "completeness",
-      width: 160,
+      flex: 1,
+      minWidth: 120,
       filter: "agSetColumnFilter",
       cellRenderer: function (p) {
-        return OrrixGrid.completenessChip(p.value);
+        var element = OrrixGrid.completenessChip(p.value);
+        element.classList.add("chip-grid");
+        return element;
       }
     },
     {
       headerName: "Review flags",
       field: "flags",
-      minWidth: 230,
-      filter: "agTextColumnFilter"
+      flex: 1.6,
+      minWidth: 160,
+      filter: "agTextColumnFilter",
+      cellRenderer: OrrixGrid.flagChips
     },
     {
-      headerName: "Orrix status",
-      field: "orrix_status_label",
-      minWidth: 250,
-      filter: "agSetColumnFilter",
-      cellRenderer: statusPill
+      headerName: "Reason",
+      field: "reason",
+      flex: 1.6,
+      minWidth: 170,
+      filter: "agTextColumnFilter",
+      // The PayPal reason codes are long; hovering shows the whole value.
+      tooltipField: "reason"
     }
   ];
+
+  // Responsive column sets, narrowest first. The dispute, its deadline and
+  // the PayPal state are the three that survive to the smallest width; the
+  // rest drop in order of how much they add at a glance.
+  //
+  // The tiers are measured against the GRID's own width, not the window's.
+  // The shell keeps a 232px sidebar at every width, so a 900px window
+  // leaves the grid about 585px: a tier chosen from the window would put
+  // five columns into that space and bring back the horizontal scrollbar
+  // the flex sizing is meant to remove. Each threshold below is the sum of
+  // its set's minimums plus a little slack, so no tier can ever overflow.
+  var NARROW = ["dispute_id", "hours_left", "state"];
+  var MEDIUM = NARROW.concat(["amount", "orrix_status_label"]);
+  var ALL_FIELDS = columns.map(function (column) {
+    return column.field;
+  });
+
+  var MEDIUM_MIN_WIDTH = 805;
+  var ALL_MIN_WIDTH = 1255;
+
+  function visibleFieldsFor(gridWidth) {
+    if (gridWidth >= ALL_MIN_WIDTH) return ALL_FIELDS;
+    if (gridWidth >= MEDIUM_MIN_WIDTH) return MEDIUM;
+    return NARROW;
+  }
+
+  function applyResponsiveColumns(api, host) {
+    var width = host ? host.clientWidth : window.innerWidth;
+    var keep = visibleFieldsFor(width);
+    var hide = ALL_FIELDS.filter(function (field) {
+      return keep.indexOf(field) === -1;
+    });
+    api.setColumnsVisible(keep, true);
+    if (hide.length) api.setColumnsVisible(hide, false);
+  }
 
   document.addEventListener("DOMContentLoaded", function () {
     var host = document.getElementById("cases-grid");
@@ -250,7 +308,13 @@
       masterDetail: true,
       detailCellRenderer: DetailRenderer,
       detailRowAutoHeight: true,
-      rowHeight: 46,
+      // Tall enough for a 26px pill to sit inside with air around it.
+      rowHeight: 56,
+      headerHeight: 48,
+      animateRows: true,
+      // Flex already fills the container; this keeps it filled after a
+      // column is hidden or shown at a breakpoint.
+      autoSizeStrategy: { type: "fitGridWidth" },
       sideBar: {
         toolPanels: ["columns", "filters"],
         defaultToolPanel: null
@@ -263,7 +327,7 @@
           { statusPanel: "agAggregationComponent", align: "right" }
         ]
       },
-      rowSelection: "single",
+      rowSelection: { mode: "singleRow", checkboxes: false, enableClickSelection: true },
       tooltipShowDelay: 300,
       onRowClicked: function (event) {
         if (event.event && event.event.defaultPrevented) return;
@@ -272,6 +336,7 @@
       },
       onGridReady: function (event) {
         OrrixGrid.restoreColumnState(event.api, STORAGE_KEY);
+        applyResponsiveColumns(event.api, document.getElementById("cases-grid"));
       }
     };
 
@@ -312,6 +377,7 @@
       reset.addEventListener("click", function () {
         OrrixGrid.clearColumnState(STORAGE_KEY);
         api.resetColumnState();
+        applyResponsiveColumns(api, host);
         if (quickFilter) {
           quickFilter.value = "";
           api.setGridOption("quickFilterText", "");
@@ -319,9 +385,28 @@
       });
     }
 
+    // Re-apply the set only when the tier actually changes, so dragging a
+    // window does not repeatedly undo a column the operator chose to show.
+    var currentTier = null;
+    function syncTier() {
+      var tier = visibleFieldsFor(host.clientWidth).length;
+      if (tier === currentTier) return;
+      currentTier = tier;
+      applyResponsiveColumns(api, host);
+    }
+    syncTier();
+
+    if (window.ResizeObserver) {
+      new window.ResizeObserver(syncTier).observe(host);
+    } else {
+      window.addEventListener("resize", syncTier);
+    }
+
     OrrixGrid.loadJson("/api/cases")
       .then(function (rows) {
         api.setGridOption("rowData", rows);
+        applyResponsiveColumns(api, host);
+        OrrixGrid.playRowEntrance(host);
         if (!rows.length) {
           OrrixGrid.showNote(
             "cases-empty",

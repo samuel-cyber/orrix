@@ -56,20 +56,123 @@ var OrrixGrid = (function () {
   }
 
   // Colour by how much time is left, with the text saying the same thing.
+  // Thresholds are in hours: under three days is red, under seven is amber,
+  // anything further out is mint, and an unknown deadline is grey.
+  var HOURS_PER_DAY = 24;
+  var URGENT_DAYS = 3;
+  var SOON_DAYS = 7;
+
   function deadlineClass(hours) {
     if (hours == null) return "chip-deadline-unknown";
     if (hours <= 0) return "chip-deadline-passed";
-    if (hours < 24) return "chip-deadline-critical";
-    if (hours < 72) return "chip-deadline-soon";
+    if (hours < URGENT_DAYS * HOURS_PER_DAY) return "chip-deadline-critical";
+    if (hours < SOON_DAYS * HOURS_PER_DAY) return "chip-deadline-soon";
     return "chip-deadline-ok";
   }
 
+  // chip-grid keeps the pill at 26px so it sits inside a 56px row instead of
+  // being clipped by it.
   function deadlineChip(params) {
     var data = params.data || {};
     if (!data.due_label) return document.createTextNode("");
-    var element = chip(data.due_label, deadlineClass(data.hours_left));
+    var element = chip(data.due_label, deadlineClass(data.hours_left) + " chip-grid");
     if (data.due_date) element.title = data.due_date;
     return element;
+  }
+
+  // -- grid cell chips ---------------------------------------------------
+
+  // A PayPal dispute state, as a chip rather than text that truncates to
+  // "no..." in a narrow column.
+  var STATE_CLASS = {
+    REQUIRED_ACTION: "chip-seller_asserted",
+    REQUIRED_OTHER_PARTY_ACTION: "chip-confirmed",
+    UNDER_REVIEW: "chip-flag",
+    RESOLVED: "chip-unavailable",
+    OPEN: "chip-flag"
+  };
+
+  function stateChip(params) {
+    var value = params.value == null ? "" : String(params.value);
+    if (!value) return document.createTextNode("");
+    var element = chip(
+      value.replace(/_/g, " ").toLowerCase(),
+      (STATE_CLASS[value] || "chip-unavailable") + " chip-grid"
+    );
+    element.title = value;
+    return element;
+  }
+
+  // Review flags arrive as one comma-joined string. One readable chip plus
+  // a "+n" count: two chips never fit this column's width, and a cut-off
+  // second chip says less than a number does. The full list is the title.
+  var FLAG_LIMIT = 1;
+
+  function flagChips(params) {
+    var raw = params.value == null ? "" : String(params.value);
+    var flags = raw
+      .split(",")
+      .map(function (flag) {
+        return flag.trim();
+      })
+      .filter(Boolean);
+
+    if (!flags.length) {
+      var none = document.createElement("span");
+      none.className = "chip-more";
+      none.textContent = "\u2014";
+      return none;
+    }
+
+    var host = document.createElement("span");
+    host.className = "chip-stack";
+    host.title = flags.join(", ");
+
+    flags.slice(0, FLAG_LIMIT).forEach(function (flag) {
+      var tone = flag.indexOf("needs_human_review") === 0 ? "chip-conflicting" : "chip-flag";
+      host.appendChild(chip(flag.replace(/_/g, " "), tone + " chip-grid"));
+    });
+
+    if (flags.length > FLAG_LIMIT) {
+      var more = document.createElement("span");
+      more.className = "chip-more";
+      more.textContent = "+" + (flags.length - FLAG_LIMIT);
+      host.appendChild(more);
+    }
+    return host;
+  }
+
+  // An amount with its currency beside it, right-aligned by the cell class.
+  function amountCell(params) {
+    var host = document.createElement("span");
+    if (!params.value) {
+      host.textContent = "";
+      return host;
+    }
+    var value = document.createElement("span");
+    value.textContent = String(params.value);
+    host.appendChild(value);
+
+    var currency = (params.data && params.data.currency) || "";
+    if (currency) {
+      var unit = document.createElement("span");
+      unit.className = "amount-currency";
+      unit.textContent = String(currency);
+      host.appendChild(unit);
+    }
+    return host;
+  }
+
+  // The first-load fade-in. The class drives a staggered CSS animation and
+  // is removed once it has played, so filtering does not replay it; under
+  // prefers-reduced-motion the CSS does nothing at all.
+  function playRowEntrance(host) {
+    if (!host || host.getAttribute("data-entrance-played") === "1") return;
+    host.setAttribute("data-entrance-played", "1");
+    host.classList.add("orrix-grid--entering");
+    window.setTimeout(function () {
+      host.classList.remove("orrix-grid--entering");
+    }, 500);
   }
 
   function originBadge(params) {
@@ -176,6 +279,10 @@ var OrrixGrid = (function () {
     statusChipClass: statusChipClass,
     deadlineChip: deadlineChip,
     deadlineClass: deadlineClass,
+    stateChip: stateChip,
+    flagChips: flagChips,
+    amountCell: amountCell,
+    playRowEntrance: playRowEntrance,
     originBadge: originBadge,
     persistColumnState: persistColumnState,
     restoreColumnState: restoreColumnState,

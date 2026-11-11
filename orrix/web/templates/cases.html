@@ -1,4 +1,8 @@
 {% extends "base.html" %}
+{# The queue uses the wide page measure: eight columns need more room than
+   prose does. Set at template scope so base.html can read it. See
+   .page-wide in app.css. #}
+{% set page_class = "page-wide" %}
 {% block title %}Cases &middot; Orrix{% endblock %}
 
 {% block head %}
@@ -32,7 +36,7 @@
   <button type="button" class="filter-chip" data-case-filter="critical">Due soon</button>
 </div>
 
-<div id="cases-grid" class="ag-theme-quartz grid grid-tall"></div>
+<div id="cases-grid" class="orrix-grid ag-theme-quartz-dark grid grid-tall"></div>
 <p id="cases-empty" class="muted empty-note" hidden>
   No disputes stored yet. Orrix fills this from webhooks and the polling fallback.
 </p>
