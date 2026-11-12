@@ -48,6 +48,29 @@ VIEWPORT = {"width": 1920, "height": 1080}
 DEFAULT_CARRIER = "DHL"
 DEFAULT_TRACKING = "1Z999AA10123456784"
 
+# The app's dark theme is the one this console is designed for, but a fresh
+# Playwright context reports prefers-color-scheme: light by default, and
+# theme.js (orrix/web/static/theme.js) falls back to that OS preference
+# whenever no stored choice exists -- which every fresh context starts as.
+# That is what rendered every earlier clip in the light theme.
+#
+# Two layers, matching how theme.js itself resolves a theme:
+#   1. color_scheme="dark" on the browser context, so matchMedia and any
+#      @media (prefers-color-scheme) CSS rule see dark.
+#   2. An init script that writes the same localStorage key theme.js reads
+#      (orrix.theme.v1) and sets data-theme directly, so the choice holds
+#      even if something about (1) does not apply -- belt and suspenders,
+#      not a guess about which layer actually matters.
+# The init script runs before any page script on every navigation in the
+# context, so it always wins the race against theme.js rather than fighting
+# it after the fact.
+THEME_STORAGE_KEY = "orrix.theme.v1"
+FORCE_DARK_INIT_SCRIPT = f"""
+try {{ window.localStorage.setItem({THEME_STORAGE_KEY!r}, 'dark'); }} catch (e) {{}}
+document.documentElement.setAttribute('data-theme', 'dark');
+document.documentElement.setAttribute('data-resolved-theme', 'dark');
+"""
+
 # Every scene the --only flag may select, in the fixed order they run.
 SCENE_NAMES = (
     "01_landing",
@@ -217,7 +240,11 @@ def sign_in_and_save_state(playwright, password: str) -> None:
     """
     browser = playwright.chromium.launch(headless=False)
     try:
-        context = browser.new_context(viewport=VIEWPORT)
+        context = browser.new_context(viewport=VIEWPORT, color_scheme="dark")
+        # So the saved storage_state's localStorage already has the dark
+        # choice recorded for this origin, and every later scene inherits it
+        # even before its own init script runs.
+        context.add_init_script(FORCE_DARK_INIT_SCRIPT)
         page = context.new_page()
         page.goto(f"{BASE_URL}/login", wait_until="networkidle")
 
@@ -242,12 +269,18 @@ def sign_in_and_save_state(playwright, password: str) -> None:
 
 def new_recorded_context(playwright_browser, name: str):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    return playwright_browser.new_context(
+    context = playwright_browser.new_context(
         storage_state=str(STATE_PATH),
         viewport=VIEWPORT,
+        color_scheme="dark",
         record_video_dir=str(RAW_DIR),
         record_video_size=VIEWPORT,
     )
+    # Redundant with the dark choice already in STATE_PATH's localStorage,
+    # but cheap and makes every scene correct on its own regardless of what
+    # state.json happens to hold.
+    context.add_init_script(FORCE_DARK_INIT_SCRIPT)
+    return context
 
 
 # -- scenes -------------------------------------------------------------
