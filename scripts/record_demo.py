@@ -448,7 +448,11 @@ def scene_09_lab(page: Page, args: argparse.Namespace) -> None:
     move_to(page, run_button)
     hold(page, 1)
     with page.expect_navigation(wait_until="load", timeout=90000):
-        run_button.click()
+        # click()'s own built-in navigation wait defaults to 30s and fires
+        # before the surrounding expect_navigation's 90s gets a chance --
+        # that mismatch is what timed this scene out on a slow model call.
+        # Both waits need the same ceiling.
+        run_button.click(timeout=90000)
 
     page.wait_for_selector("section.lanes[aria-label='Comparison result']", timeout=90000)
     lanes = page.locator("section.lanes[aria-label='Comparison result']")
