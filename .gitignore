@@ -6,6 +6,9 @@
 # Private notes — never tracked
 notes/
 
+# Demo recordings and the session state captured for them — never tracked
+demo/
+
 # Tooling
 .claude/
 
