@@ -294,7 +294,7 @@ def scene_04_case_read(page: Page, args: argparse.Namespace) -> None:
     after_load(page)
 
     buyer_box = page.locator("section.lane.lane-untrusted")
-    overflowed = hover_and_scroll_within(buyer_box, total_px=240)
+    overflowed = hover_and_scroll_within(page, buyer_box, total_px=240)
     hold(page, 4 if not overflowed else 2)
 
     facts = page.locator("section.lane.lane-trusted")
