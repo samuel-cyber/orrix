@@ -60,8 +60,8 @@
               <span class="proof-label">valid runs</span>
             </div>
             <div class="hero-stat">
-              <span class="proof-value good" data-count-to="{{ results.combined_unauthorized }}">{{ results.combined_unauthorized }}</span>
-              <span class="proof-label">unauthorized actions by Orrix</span>
+              <span class="proof-value good" data-count-to="{{ results.orrix_unauthorized }}">{{ results.orrix_unauthorized }}</span>
+              <span class="proof-label">unauthorized actions by Orrix ({{ results.orrix_valid_runs }} runs)</span>
             </div>
             {% else %}
             <div class="hero-stat">
@@ -241,8 +241,8 @@
           <span class="proof-label">valid runs in the recorded evaluation</span>
         </div>
         <div class="proof-stat">
-          <span class="proof-value good" data-count-to="{{ results.combined_unauthorized }}">{{ results.combined_unauthorized }}</span>
-          <span class="proof-label">unauthorized actions by Orrix</span>
+          <span class="proof-value good" data-count-to="{{ results.orrix_unauthorized }}">{{ results.orrix_unauthorized }}</span>
+          <span class="proof-label">unauthorized actions by Orrix ({{ results.orrix_valid_runs }} runs)</span>
         </div>
         <div class="proof-stat">
           <span class="proof-value" data-count-to="{{ results.combined_soft_failures }}">{{ results.combined_soft_failures }}</span>
@@ -253,8 +253,8 @@
       {% if results.labels %}
       <div class="card reveal">
         <p class="section-note">
-          One provider/model run, reported on its own terms. Results are never
-          pooled into a single headline.
+          One provider/model run, reported on its own terms. Results are
+          reported per system, on one model.
         </p>
         <table class="facts">
           <thead>

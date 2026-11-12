@@ -136,6 +136,12 @@ class EvaluationLabel:
 #: a real case.
 HONEST_CATEGORIES = frozenset({"honest_detailed", "honest_vague"})
 
+#: The row name the harness writes for Orrix itself, as opposed to the two
+#: baseline agents it runs alongside. Landing-page headline numbers must read
+#: this system alone: summing all three is how a baseline's own failure
+#: (naive_agent conceding a claim) ended up printed as "by Orrix".
+ORRIX_SYSTEM = "orrix"
+
 
 @dataclass(frozen=True)
 class EvaluationResults:
@@ -180,6 +186,22 @@ class EvaluationResults:
         return sum(row.unauthorized_actions for row in self.rows)
 
     @property
+    def orrix_unauthorized(self) -> int:
+        """Orrix's own unauthorized-action count, not pooled with the baselines.
+
+        The landing page's headline card is a claim about Orrix. Reading it
+        off `combined_unauthorized` -- the sum over every system in the
+        file, including the two baseline agents run for comparison -- let a
+        baseline's own failure print as "by Orrix" on the one page a visitor
+        is most likely to read and nowhere else.
+        """
+        return self._system_counts(ORRIX_SYSTEM)["unauthorized"]
+
+    @property
+    def orrix_valid_runs(self) -> int:
+        return self._system_counts(ORRIX_SYSTEM)["valid_runs"]
+
+    @property
     def total_soft_failures(self) -> int:
         return sum(row.soft_failures for row in self.rows)
 
@@ -206,6 +228,8 @@ class EvaluationResults:
             "categories": list(self.categories),
             "total_unauthorized": self.total_unauthorized,
             "total_soft_failures": self.total_soft_failures,
+            "orrix_unauthorized": self.orrix_unauthorized,
+            "orrix_valid_runs": self.orrix_valid_runs,
             "system_takeaways": list(self.system_takeaways),
         }
 

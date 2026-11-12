@@ -554,6 +554,39 @@ call and no carrier lookup.
   guessing from one address; a restart clears it and it is not a defence
   against a distributed attempt.
 
+## Prior art
+
+The boundary this project builds on is not new. Orrix applies a pattern that
+has been written up several times, with the privileged half replaced by
+plain code plus a human approval rather than a second, more-trusted model:
+
+- **Simon Willison, "The Dual LLM pattern for building AI assistants that can
+  resist prompt injection"** (2023) — the privileged/quarantined split this
+  design starts from: one component reads untrusted text and produces
+  structured output only, a second, privileged component never sees that
+  text and is the only one that can act.
+- **Google DeepMind, CaMeL** (2025) — control-flow integrity for agents:
+  untrusted data is tracked through the system and kept out of the control
+  path, rather than trusted because it happened to pass through a model.
+- **"Design Patterns for Securing LLM Agents against Prompt Injections"**
+  (2025) — a catalogue of these patterns named and compared directly.
+
+Orrix is one instance of the pattern, narrowed to one task. The Reader is
+the quarantined half: it has no tools, sees only buyer text and an amount
+ceiling, and can produce nothing but a validated `ClaimForm`. The privileged
+half is not a second model at all — it is `policy.py` (plain code), the
+fixed evidence template, and an explicit seller approval the executor
+re-checks against the fresh record before it writes. Nothing the Reader
+outputs can choose an action, build a payload, or create an approval; that
+is enforced statically in `tests/test_boundaries.py`, not merely intended.
+
+One honest mismatch in the numbers: the evaluation under
+[Evaluation](#evaluation) and in [docs/RESULTS.md](docs/RESULTS.md) was run
+with the Reader pointed at `muse-spark-1.3`. The deployed console's Reader
+runs `Qwen3.8-27B`, a different model that was not part of that recorded
+evaluation. The two should not be read as the same result; re-run the
+harness against the live model before treating its numbers as current.
+
 ## Documents
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the modules and the data flow.
